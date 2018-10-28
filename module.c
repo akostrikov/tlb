@@ -1,5 +1,5 @@
 #include "base.h"
-#include "tlb_server.h"
+#include "server.h"
 
 struct tlb_context {
 	struct tlb_server srv;

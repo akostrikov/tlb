@@ -1,4 +1,4 @@
-#include "tlb_server.h"
+#include "server.h"
 
 struct tlb_con {
 	struct socket *sock;
