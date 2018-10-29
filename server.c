@@ -17,14 +17,14 @@ static void tlb_con_data_ready(struct sock *sk)
 {
 	struct tlb_con *con = sk->sk_user_data;
 
-	trace("con 0x%px data ready\n", con);
+	(void)con;
 }
 
 static void tlb_con_write_space(struct sock *sk)
 {
 	struct tlb_con *con = sk->sk_user_data;
 
-	trace("con 0x%px write space\n", con);
+	(void)con;
 }
 
 static void tlb_con_state_change(struct sock *sk)
@@ -37,10 +37,42 @@ static void tlb_con_state_change(struct sock *sk)
 static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 {
 	struct tlb_con *con = (struct tlb_con *)arg;
+	int r, received, sent;
+	char buf[512];
 
 	BUG_ON(con->co != co);
 
 	trace("con 0x%px co 0x%px\n", con, co);
+
+	for (;;) {
+		r = ksock_recv(con->sock, buf, sizeof(buf));
+		if (r < 0) {
+			if (r == -EAGAIN) {
+				coroutine_yield(co);
+				continue;
+			} else
+				break;
+		} else if (r == 0)
+			break;
+
+		received = r;
+		sent = 0;
+		while (sent < received) {
+			r = ksock_send(con->sock, (char *)buf + sent, received - sent);
+			if (r < 0) {
+				if (r == -EAGAIN) {
+					coroutine_yield(co);
+					continue;
+				} else
+					break;
+			}
+			sent += r;
+		}
+
+		if (r < 0)
+			break;
+	}
+	trace("con 0x%px co 0x%px r %d", con, co, r);
 
 	tlb_con_delete(con);
 	return NULL;
@@ -131,7 +163,7 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 		return r;
 	}
 
-	srv->listen_thread = kthread_create(tlb_server_listen_thread_routine, srv, "tlb_srv");
+	srv->listen_thread = kthread_create(tlb_server_listen_thread_routine, srv, "tlb_listen");
 	if (IS_ERR(srv->listen_thread)) {
 		r = PTR_ERR(srv->listen_thread);
 		coroutine_thread_stop(&srv->con_thread);

@@ -164,227 +164,34 @@ void ksock_release(struct socket *sock)
 	sock_release(sock);
 }
 
-int ksock_write_timeout(struct socket *sock, void *buffer, u32 nob,
-	u64 ticks, u32 *pwrote)
-{
-	int error;
-	u64 then, delta;
-	struct timeval tv;
-	u32 wrote = 0;
-	mm_segment_t oldmm = get_fs();
-
-	if (WARN_ON(nob <= 0))
-		return -EINVAL;
-
-	for (;;) {
-		struct iovec iov = {
-			.iov_base = buffer,
-			.iov_len = nob
-		};
-		struct msghdr msg;
-
-		memset(&msg, 0, sizeof(msg));
-		msg.msg_flags = (ticks == 0) ? MSG_DONTWAIT : 0;
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 18, 0)
-		msg.msg_iov = &iov;
-		msg.msg_iovlen = 1;
-#else
-		iov_iter_init(&msg.msg_iter, WRITE, &iov, 1, nob);
-#endif
-		tv = (struct timeval) {
-			.tv_sec = ticks/HZ,
-			.tv_usec = ((ticks % HZ) * 1000000)/HZ
-		};
-
-		set_fs(KERNEL_DS);
-		error = sock_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
-					(char *)&tv, sizeof(tv));
-		set_fs(oldmm);
-		if (error)
-			goto out;
-
-		then = get_jiffies_64();
-		set_fs(KERNEL_DS);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 0, 0)
-		error = sock_sendmsg(sock, &msg, nob);
-#else
-		error = sock_sendmsg(sock, &msg);
-#endif
-		set_fs(oldmm);
-		delta = get_jiffies_64() - then;
-		delta = (delta > ticks) ? ticks : delta;
-		ticks -= delta;
-
-		if (error < 0)
-			goto out;
-
-		if (error == 0) {
-			error = -ECONNABORTED;
-			goto out;
-		}
-
-		if (error > 0)
-			wrote += error;
-
-		buffer = (void *)((unsigned long)buffer + error);
-		WARN_ON(error <= 0);
-		WARN_ON(nob < error);
-		nob -= error;
-		if (nob == 0) {
-			error = 0;
-			goto out;
-		}
-
-		if (ticks == 0) {
-			error = -ETIME;
-			goto out;
-		}
-	}
-out:
-	if (pwrote)
-		*pwrote = wrote;
-
-	return error;
-}
-
-int ksock_read_timeout(struct socket *sock, void *buffer, u32 nob,
-	u64 ticks, u32 *pread)
-{
-	int error;
-	u64 then, delta;
-	struct timeval tv;
-	u32 read = 0;
-	mm_segment_t oldmm = get_fs();
-
-	if (WARN_ON(nob <= 0))
-		return -EINVAL;
-
-	for (;;) {
-		struct iovec iov = {
-			.iov_base = buffer,
-			.iov_len = nob
-		};
-
-		struct msghdr msg;
-
-		memset(&msg, 0, sizeof(msg));
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(3, 18, 0)
-		msg.msg_iov = &iov;
-		msg.msg_iovlen = 1;
-#else
-		iov_iter_init(&msg.msg_iter, READ, &iov, 1, nob);
-#endif
-		tv = (struct timeval) {
-			.tv_sec = ticks/HZ,
-			.tv_usec = ((ticks % HZ) * 1000000)/HZ
-		};
-
-		set_fs(KERNEL_DS);
-		error = sock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
-					(char *)&tv, sizeof(tv));
-		set_fs(oldmm);
-
-		if (error)
-			goto out;
-
-		then = get_jiffies_64();
-		set_fs(KERNEL_DS);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 5)
-		error = sock_recvmsg(sock, &msg, 0);
-#else
-		error = sock_recvmsg(sock, &msg, nob, 0);
-#endif
-		set_fs(oldmm);
-		delta = (get_jiffies_64() - then);
-		delta = (delta > ticks) ? ticks : delta;
-		ticks -= delta;
-
-		if (error < 0)
-			goto out;
-
-		if (error == 0) {
-			error = -ECONNRESET;
-			goto out;
-		}
-
-		if (error > 0)
-			read += error;
-
-		buffer = (void *)((unsigned long)buffer + error);
-		WARN_ON(error <= 0);
-		WARN_ON(nob < error);
-		nob -= error;
-		if (nob == 0) {
-			error = 0;
-			goto out;
-		}
-
-		if (ticks == 0) {
-			error = -ETIMEDOUT;
-			goto out;
-		}
-	}
-out:
-	if (pread)
-		*pread = read;
-	return error;
-}
-
-int ksock_read(struct socket *sock, void *buffer, u32 nob, u32 *pread)
-{
-	u32 read = 0, off = 0;
-	int err = 0;
-
-	while (off < nob) {
-		err = ksock_read_timeout(sock, (char *)buffer + off,
-				nob - off, 60 * HZ, &read);
-		off += read;
-		if (err)
-			break;
-	}
-	*pread = off;
-	return err;
-}
-
-
-int ksock_write(struct socket *sock, void *buffer, u32 nob, u32 *pwrote)
-{
-	u32 wrote = 0, off = 0;
-	int err = 0;
-
-	while (off < nob) {
-		err = ksock_write_timeout(sock, (char *)buffer + off,
-				nob - off, 60 * HZ, &wrote);
-		off += wrote;
-		if (err)
-			break;
-	}
-	*pwrote = off;
-	return err;
-}
-
 int ksock_send(struct socket *sock, void *buf, int len)
 {
-	u32 wrote;
-	int r;
+	struct iovec iov;
+	struct msghdr msg;
 
-	r = ksock_write(sock, buf, len, &wrote);
-	if (r)
-		return r;
+	iov.iov_base = buf;
+	iov.iov_len = len;
 
-	return wrote;
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+	iov_iter_init(&msg.msg_iter, WRITE, &iov, 1, len);
+
+	return sock_sendmsg(sock, &msg);
 }
 
 int ksock_recv(struct socket *sock, void *buf, int len)
 {
-	u32 read;
-	int r;
+	struct iovec iov;
+	struct msghdr msg;
 
-	r = ksock_read(sock, buf, len, &read);
-	if (r)
-		return r;
+	iov.iov_base = buf;
+	iov.iov_len = len;
 
-	return read;
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+	iov_iter_init(&msg.msg_iter, READ, &iov, 1, len);
+
+	return sock_recvmsg(sock, &msg, 0);
 }
 
 int ksock_listen(struct socket **sockp, __u32 local_ip, int local_port,
@@ -415,7 +222,7 @@ int ksock_accept(struct socket **newsockp, struct socket *sock, struct ksock_cal
 	int error;
 
 	init_waitqueue_entry(&wait, current);
-	error = sock_create_lite(PF_PACKET, sock->type, IPPROTO_TCP, &newsock);
+	error = sock_create_lite(sock->ops->family, sock->type, IPPROTO_TCP, &newsock);
 	if (error)
 		return error;
 
