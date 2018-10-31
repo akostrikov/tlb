@@ -45,14 +45,22 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 	struct tlb_con *con = (struct tlb_con *)arg;
 	struct tlb_server *srv = con->srv;
 	int r, received, sent;
-	char buf[512];
+	char *buf;
+	int buf_len;
 
 	BUG_ON(con->co != co);
 
 	trace("con 0x%px co 0x%px\n", con, co);
 
+	buf_len = 16 * 1024;
+	buf = kmalloc(buf_len, GFP_KERNEL);
+	if (!buf) {
+		r = -ENOMEM;
+		goto out;
+	}
+
 	for (;;) {
-		r = ksock_recv(con->sock, buf, sizeof(buf));
+		r = ksock_recv(con->sock, buf, buf_len);
 		if (r < 0) {
 			if (r == -EAGAIN) {
 				coroutine_yield(co);
@@ -80,6 +88,7 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 			break;
 	}
 
+out:
 	trace("con 0x%px co 0x%px r %d", con, co, r);
 
 	spin_lock(&srv->con_list_lock);
@@ -87,6 +96,7 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 	spin_unlock(&srv->con_list_lock);
 
 	tlb_con_delete(con);
+	kfree(buf);
 	return NULL;
 }
 

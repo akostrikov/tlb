@@ -7,7 +7,10 @@ struct coroutine_thread {
 	struct task_struct *task;
 	struct kernel_jmp_buf ctx;
 	struct list_head co_list;
-	struct rw_semaphore co_list_lock;
+	spinlock_t co_list_lock;
+	struct wait_queue_head waitq;
+	bool stopping;
+	atomic_t signaled;
 };
 
 struct coroutine {

@@ -56,9 +56,9 @@ static void coroutine_delete(struct coroutine *co)
 
 	trace("co delete 0x%px stack 0x%px\n", co, co->stack);
 
-	down_write(&thread->co_list_lock);
+	spin_lock(&thread->co_list_lock);
 	list_del_init(&co->co_list_entry);
-	up_write(&thread->co_list_lock);
+	spin_unlock(&thread->co_list_lock);
 
 	kfree(co->stack);
 	kfree(co);
@@ -115,10 +115,14 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 	co->ctx.rsp = (ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong);
 	co->running = true;
 
+	trace("co 0x%px start\n", co);
+
 	coroutine_ref(co);
-	down_write(&thread->co_list_lock);
+	spin_lock(&thread->co_list_lock);
 	list_add_tail(&co->co_list_entry, &thread->co_list);
-	up_write(&thread->co_list_lock);
+	spin_unlock(&thread->co_list_lock);
+
+	coroutine_signal(co);
 }
 
 static void coroutine_enter(struct coroutine *co)
@@ -133,6 +137,8 @@ static void coroutine_enter(struct coroutine *co)
 void coroutine_signal(struct coroutine *co)
 {
 	atomic_cmpxchg(&co->signaled, 0, 1);
+	atomic_inc(&co->thread->signaled);
+	wake_up_interruptible(&co->thread->waitq);
 }
 
 static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread *thread, struct coroutine *prev_co)
@@ -140,19 +146,19 @@ static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread
 	struct list_head *list_entry;
 	struct coroutine *co;
 
-	down_read(&thread->co_list_lock);	
+	spin_lock(&thread->co_list_lock);
 	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
 	while (list_entry != &thread->co_list) {
 		co = container_of(list_entry, struct coroutine, co_list_entry);
 		if (atomic_cmpxchg(&co->signaled, 1, 0) == 1 && atomic_inc_not_zero(&co->ref_count)) {
-			up_read(&thread->co_list_lock);
+			spin_unlock(&thread->co_list_lock);
 			if (prev_co)
 				coroutine_deref(prev_co);
 			return co;
 		}
 		list_entry = list_entry->next;
 	}
-	up_read(&thread->co_list_lock);
+	spin_unlock(&thread->co_list_lock);
 	if (prev_co)
 		coroutine_deref(prev_co);
 	return NULL;
@@ -165,15 +171,21 @@ static int coroutine_thread_routine(void *data)
 
 	trace("co thread 0x%px enter\n", thread);
 
-	while (!kthread_should_stop()) {
-		for (co = coroutine_thread_next_coroutine(thread, NULL); co != NULL;) {
+	for (;;) {
+		wait_event_interruptible(thread->waitq, (thread->stopping || atomic_read(&thread->signaled)));
+		if (thread->stopping)
+			break;
+
+		atomic_set(&thread->signaled, 0);
+		co = coroutine_thread_next_coroutine(thread, NULL);
+		while (co != NULL) {
 			coroutine_enter(co);
 			next_co = coroutine_thread_next_coroutine(thread, co);
 			if (!co->running) {
-				down_write(&thread->co_list_lock);
+				spin_lock(&thread->co_list_lock);
 				BUG_ON(list_empty(&co->co_list_entry));
 				list_del_init(&co->co_list_entry);
-				up_write(&thread->co_list_lock);
+				spin_unlock(&thread->co_list_lock);
 				coroutine_deref(co);
 			}
 			co = next_co;
@@ -188,12 +200,17 @@ int coroutine_thread_start(struct coroutine_thread *thread)
 {
 	struct task_struct *task;
 
+	memset(thread, 0, sizeof(*thread));
+	spin_lock_init(&thread->co_list_lock);
+	INIT_LIST_HEAD(&thread->co_list);
+	init_waitqueue_head(&thread->waitq);
+	thread->stopping = false;
+	atomic_set(&thread->signaled, 0);
+
 	task = kthread_create(coroutine_thread_routine, thread, "coroutine");
 	if (IS_ERR(task))
 		return PTR_ERR(task);
 
-	init_rwsem(&thread->co_list_lock);
-	INIT_LIST_HEAD(&thread->co_list);
 	get_task_struct(task);
 	thread->task = task;
 	wake_up_process(task);
@@ -206,12 +223,14 @@ void coroutine_thread_stop(struct coroutine_thread *thread)
 	struct coroutine *co, *co_tmp;
 	struct list_head co_list;
 
+	thread->stopping = true;
+	wake_up_interruptible(&thread->waitq);
 	kthread_stop(thread->task);
 
 	INIT_LIST_HEAD(&co_list);
-	down_write(&thread->co_list_lock);
+	spin_lock(&thread->co_list_lock);
 	list_splice_init(&thread->co_list, &co_list);
-	up_write(&thread->co_list_lock);
+	spin_unlock(&thread->co_list_lock);
 
 	list_for_each_entry_safe(co, co_tmp, &co_list, co_list_entry) {
 		list_del_init(&co->co_list_entry);
