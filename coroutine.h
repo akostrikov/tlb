@@ -21,6 +21,7 @@ struct coroutine {
 	bool running;
 	int magic;
 	atomic_t ref_count;
+	atomic_t signaled;
 };
 
 struct coroutine *coroutine_create(struct coroutine_thread *thread);
@@ -32,6 +33,8 @@ void coroutine_deref(struct coroutine *co);
 void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, void* arg), void *arg);
 
 void coroutine_yield(struct coroutine *co);
+
+void coroutine_signal(struct coroutine *co);
 
 int coroutine_thread_start(struct coroutine_thread *thread);
 

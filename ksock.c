@@ -173,7 +173,7 @@ int ksock_send(struct socket *sock, void *buf, int len)
 	iov.iov_len = len;
 
 	memset(&msg, 0, sizeof(msg));
-	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL | MSG_EOR;
 	iov_iter_init(&msg.msg_iter, WRITE, &iov, 1, len);
 
 	return sock_sendmsg(sock, &msg);
@@ -191,7 +191,7 @@ int ksock_recv(struct socket *sock, void *buf, int len)
 	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
 	iov_iter_init(&msg.msg_iter, READ, &iov, 1, len);
 
-	return sock_recvmsg(sock, &msg, 0);
+	return sock_recvmsg(sock, &msg, msg.msg_flags);
 }
 
 int ksock_listen(struct socket **sockp, __u32 local_ip, int local_port,

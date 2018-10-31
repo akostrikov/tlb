@@ -22,6 +22,7 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	co->thread = thread;
 	co->stack = kmalloc(COROUTINE_STACK_SIZE, GFP_KERNEL);
 	atomic_set(&co->ref_count, 1);
+	atomic_set(&co->signaled, 0);
 	INIT_LIST_HEAD(&co->co_list_entry);
 	if (!co->stack) {
 		kfree(co);
@@ -129,6 +130,11 @@ static void coroutine_enter(struct coroutine *co)
 		kernel_longjmp(&co->ctx, 0x1);
 }
 
+void coroutine_signal(struct coroutine *co)
+{
+	atomic_cmpxchg(&co->signaled, 0, 1);
+}
+
 static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread *thread, struct coroutine *prev_co)
 {
 	struct list_head *list_entry;
@@ -138,7 +144,7 @@ static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread
 	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
 	while (list_entry != &thread->co_list) {
 		co = container_of(list_entry, struct coroutine, co_list_entry);
-		if (atomic_inc_not_zero(&co->ref_count)) {
+		if (atomic_cmpxchg(&co->signaled, 1, 0) == 1 && atomic_inc_not_zero(&co->ref_count)) {
 			up_read(&thread->co_list_lock);
 			if (prev_co)
 				coroutine_deref(prev_co);
@@ -156,15 +162,12 @@ static int coroutine_thread_routine(void *data)
 {
 	struct coroutine_thread *thread = (struct coroutine_thread *)data;
 	struct coroutine *co, *next_co;
-	bool running;
 
 	trace("co thread 0x%px enter\n", thread);
 
 	while (!kthread_should_stop()) {
-		running = false;
 		for (co = coroutine_thread_next_coroutine(thread, NULL); co != NULL;) {
 			coroutine_enter(co);
-			running = true;
 			next_co = coroutine_thread_next_coroutine(thread, co);
 			if (!co->running) {
 				down_write(&thread->co_list_lock);
@@ -175,9 +178,6 @@ static int coroutine_thread_routine(void *data)
 			}
 			co = next_co;
 		}
-		if (!running)
-			msleep(10);
-
 	}
 	trace("co thread 0x%px leave\n", thread);
 
