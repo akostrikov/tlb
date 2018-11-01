@@ -1,9 +1,6 @@
-#include "base.h"
+#include "module.h"
+#include "sysfs.h"
 #include "server.h"
-
-struct tlb_context {
-	struct tlb_server srv;
-};
 
 static struct tlb_context g_context;
 
@@ -13,7 +10,8 @@ static int __init tlb_init(void)
 
 	trace("initing\n");
 
-	r = tlb_server_start(&g_context.srv, "0.0.0.0", 51111);
+	tlb_server_init(&g_context.srv);
+	r = tlb_sysfs_init(&g_context.kobj_holder, fs_kobj, &tlb_ktype, "%s", "tlb");
 
 	trace("inited r %d\n", r);
 	return r;
@@ -23,6 +21,7 @@ static void __exit tlb_exit(void)
 {
 	trace("exiting\n");
 
+	tlb_sysfs_deinit(&g_context.kobj_holder);
 	tlb_server_stop(&g_context.srv);
 
 	trace("exited\n");

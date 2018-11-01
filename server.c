@@ -1,127 +1,11 @@
 #include "server.h"
+#include "con.h"
 
-struct tlb_con {
-	struct socket *sock;
-	struct coroutine *co;
-	struct tlb_server *srv;
-	struct list_head list_entry;
-};
-
-static void tlb_con_delete(struct tlb_con *con)
+void tlb_server_unlink_con(struct tlb_server *srv, struct tlb_con *con)
 {
-	BUG_ON(!list_empty(&con->list_entry));
-
-	trace("con 0x%px delete\n", con);
-	coroutine_deref(con->co);
-	if (con->sock)
-		ksock_release(con->sock);
-}
-
-static void tlb_con_data_ready(struct sock *sk)
-{
-	struct tlb_con *con = sk->sk_user_data;
-
-	coroutine_signal(con->co);
-}
-
-static void tlb_con_write_space(struct sock *sk)
-{
-	struct tlb_con *con = sk->sk_user_data;
-
-	coroutine_signal(con->co);
-}
-
-static void tlb_con_state_change(struct sock *sk)
-{
-	struct tlb_con *con = sk->sk_user_data;
-
-	trace("con 0x%px state change %u\n", con, sk->sk_state);
-
-	coroutine_signal(con->co);
-}
-
-static void *tlb_con_coroutine(struct coroutine *co, void *arg)
-{
-	struct tlb_con *con = (struct tlb_con *)arg;
-	struct tlb_server *srv = con->srv;
-	int r, received, sent;
-	char *buf;
-	int buf_len;
-
-	BUG_ON(con->co != co);
-
-	trace("con 0x%px co 0x%px\n", con, co);
-
-	buf_len = 16 * 1024;
-	buf = kmalloc(buf_len, GFP_KERNEL);
-	if (!buf) {
-		r = -ENOMEM;
-		goto out;
-	}
-
-	for (;;) {
-		r = ksock_recv(con->sock, buf, buf_len);
-		if (r < 0) {
-			if (r == -EAGAIN) {
-				coroutine_yield(co);
-				continue;
-			} else
-				break;
-		} else if (r == 0)
-			break;
-
-		received = r;
-		sent = 0;
-		while (sent < received) {
-			r = ksock_send(con->sock, (char *)buf + sent, received - sent);
-			if (r < 0) {
-				if (r == -EAGAIN) {
-					coroutine_yield(co);
-					continue;
-				} else
-					break;
-			}
-			sent += r;
-		}
-
-		if (r < 0)
-			break;
-	}
-
-out:
-	trace("con 0x%px co 0x%px r %d", con, co, r);
-
 	spin_lock(&srv->con_list_lock);
 	list_del_init(&con->list_entry);
 	spin_unlock(&srv->con_list_lock);
-
-	tlb_con_delete(con);
-	kfree(buf);
-	return NULL;
-}
-
-static struct tlb_con *tlb_con_create(struct tlb_server *srv)
-{
-	struct tlb_con *con;
-
-	con = kmalloc(sizeof(*con), GFP_KERNEL);
-	if (!con)
-		return NULL;
-	memset(con, 0, sizeof(*con));
-	con->co = coroutine_create(&srv->con_thread);
-	if (!con->co) {
-		kfree(con);
-		return NULL;
-	}
-	con->srv = srv;
-	INIT_LIST_HEAD(&con->list_entry);
-	return con;
-}
-
-static void tlb_con_start(struct tlb_con *con, struct socket *sock)
-{
-	con->sock = sock;
-	coroutine_start(con->co, tlb_con_coroutine, con);
 }
 
 static int tlb_server_listen_thread_routine(void *arg)
@@ -131,8 +15,8 @@ static int tlb_server_listen_thread_routine(void *arg)
 	struct ksock_callbacks callbacks;
 	struct tlb_con *con;
 	int r;
-	
-	while (!kthread_should_stop() && !srv->stopping) {
+
+	while (!kthread_should_stop() && srv->state != TLB_SRV_STOPPING) {
 		con = tlb_con_create(srv);
 		if (!con)
 			break;
@@ -158,13 +42,28 @@ static int tlb_server_listen_thread_routine(void *arg)
 	return 0;
 }
 
+void tlb_server_init(struct tlb_server *srv)
+{
+	mutex_init(&srv->lock);
+	srv->state = TLB_SRV_INITED;
+}
+
 int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 {
 	int r, i;
 
-	memset(srv, 0, sizeof(*srv));
-	if (snprintf(srv->host, ARRAY_SIZE(srv->host), "%s", host) != strlen(host))
-		return EINVAL;
+	if (strlen(host) >= ARRAY_SIZE(srv->host) || port <= 0 || port > 65535)
+		return -EINVAL;
+
+	mutex_lock(&srv->lock);
+	if (srv->state != TLB_SRV_INITED) {
+		r = -EEXIST;
+		goto unlock;
+	}
+	srv->state = TLB_SRV_STARTING;
+
+	tlb_server_init_targets(srv);
+	snprintf(srv->host, ARRAY_SIZE(srv->host), "%s", host);
 	srv->port = port;
 	INIT_LIST_HEAD(&srv->con_list);
 	spin_lock_init(&srv->con_list_lock);
@@ -180,39 +79,55 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 			break;
 	}
 	if (r)
-		return r;
+		goto deinit_targets;
 
 	r = coroutine_thread_start(&srv->con_thread);
-	if (r) {
-		ksock_release(srv->listen_sock);
-		return r;
-	}
+	if (r)
+		goto release_listen_sock;
 
 	srv->listen_thread = kthread_create(tlb_server_listen_thread_routine, srv, "tlb_listen");
 	if (IS_ERR(srv->listen_thread)) {
 		r = PTR_ERR(srv->listen_thread);
-		coroutine_thread_stop(&srv->con_thread);
-		ksock_release(srv->listen_sock);
-		return r;
+		goto stop_con_coroutine;
 	}
 
 	get_task_struct(srv->listen_thread);
 	wake_up_process(srv->listen_thread);
+	srv->state = TLB_SRV_RUNNING;
+	mutex_unlock(&srv->lock);
 	return 0;
+
+stop_con_coroutine:
+	coroutine_thread_stop(&srv->con_thread);
+release_listen_sock:
+	ksock_release(srv->listen_sock);
+deinit_targets:
+	tlb_server_deinit_targets(srv);
+	srv->state = TLB_SRV_INITED;
+unlock:
+	mutex_unlock(&srv->lock);
+	return r;
 }
 
-void tlb_server_stop(struct tlb_server *srv)
+int tlb_server_stop(struct tlb_server *srv)
 {
 	struct tlb_con *con, *tmp;
 
-	srv->stopping = true;
+	mutex_lock(&srv->lock);
+	if (srv->state != TLB_SRV_RUNNING) {
+		mutex_unlock(&srv->lock);
+		return -ENOENT;
+	}
+	srv->state = TLB_SRV_STOPPING;
+
 	while (!srv->listen_thread_stopping) {
 		ksock_abort_accept(srv->listen_sock);
 		msleep_interruptible(100);
 	}
-
 	kthread_stop(srv->listen_thread);
 	put_task_struct(srv->listen_thread);
+	srv->listen_thread_stopping = false;
+
 	coroutine_thread_stop(&srv->con_thread);
 	ksock_release(srv->listen_sock);
 
@@ -220,4 +135,10 @@ void tlb_server_stop(struct tlb_server *srv)
 		list_del_init(&con->list_entry);
 		tlb_con_delete(con);
 	}
+
+	tlb_server_deinit_targets(srv);
+
+	srv->state = TLB_SRV_INITED;
+	mutex_unlock(&srv->lock);
+	return 0;
 }

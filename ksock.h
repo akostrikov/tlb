@@ -41,6 +41,6 @@ int ksock_ioctl(struct socket *sock, int cmd, unsigned long arg);
 
 int ksock_set_nodelay(struct socket *sock, bool no_delay);
 
-int ksock_connect_host(struct socket **sockp, char *host, u16 port);
+int ksock_connect_host(struct socket **sockp, char *host, u16 port, struct ksock_callbacks *callbacks);
 
 int ksock_listen_host(struct socket **sockp, char *host, int port, int backlog);

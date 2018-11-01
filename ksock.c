@@ -319,7 +319,7 @@ static int ksock_dns_resolve(char *name, struct sockaddr_storage *ss)
 	return r;
 }
 
-int ksock_connect_host(struct socket **sockp, char *host, u16 port)
+int ksock_connect_host(struct socket **sockp, char *host, u16 port, struct ksock_callbacks *callbacks)
 {
 	struct sockaddr_storage addr;
 	struct sockaddr_in *in4 = (struct sockaddr_in *)&addr;
@@ -359,6 +359,15 @@ int ksock_connect_host(struct socket **sockp, char *host, u16 port)
 		(addr.ss_family == AF_INET) ? sizeof(*in4) : sizeof(*in6), 0);
 	if (r)
 		goto release_sock;
+
+	if (callbacks) {
+		struct sock *sk = sock->sk;
+		
+		sk->sk_user_data = callbacks->user_data;
+		sk->sk_data_ready = callbacks->data_ready;
+		sk->sk_write_space = callbacks->write_space;
+		sk->sk_state_change = callbacks->state_change;
+	}
 
 	*sockp = sock;
 	return 0;
