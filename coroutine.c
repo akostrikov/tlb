@@ -38,6 +38,7 @@ void coroutine_ref(struct coroutine *co)
 static void coroutine_delete(struct coroutine *co)
 {
 	struct coroutine_thread *thread = co->thread;
+	unsigned long flags;
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
@@ -46,9 +47,9 @@ static void coroutine_delete(struct coroutine *co)
 
 	//trace("co delete 0x%px stack 0x%px\n", co, co->stack);
 
-	spin_lock(&thread->co_list_lock);
+	spin_lock_irqsave(&thread->co_list_lock, flags);
 	list_del_init(&co->co_list_entry);
-	spin_unlock(&thread->co_list_lock);
+	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
 	kfree(co->stack);
 	kfree(co);
@@ -87,8 +88,6 @@ static void coroutine_trampoline(void)
 
 void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, void* arg), void *arg)
 {
-	struct coroutine_thread *thread = co->thread;
-
 	BUG_ON(co->magic != COROUTINE_MAGIC);
 	
 	co->fun = fun;
@@ -98,11 +97,6 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 	co->running = true;
 
 	//trace("co 0x%px start\n", co);
-
-	coroutine_ref(co);
-	spin_lock(&thread->co_list_lock);
-	list_add_tail(&co->co_list_entry, &thread->co_list);
-	spin_unlock(&thread->co_list_lock);
 
 	coroutine_signal(co);
 }
@@ -119,8 +113,15 @@ static __always_inline void coroutine_enter(struct coroutine *co)
 void coroutine_signal(struct coroutine *co)
 {
 	struct coroutine_thread *thread = co->thread;
+	unsigned long flags;
 
-	atomic_cmpxchg(&co->signaled, 0, 1);
+	atomic_inc(&co->signaled);
+	spin_lock_irqsave(&thread->co_list_lock, flags);
+	if (list_empty(&co->co_list_entry)) {
+		list_add(&co->co_list_entry, &thread->co_list);
+		coroutine_ref(co);
+	}
+	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
 	atomic_inc(&thread->signaled);
 	wake_up_interruptible(&thread->waitq);
@@ -136,20 +137,21 @@ static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread
 {
 	struct list_head *list_entry;
 	struct coroutine *co;
+	unsigned long flags;
 
-	spin_lock(&thread->co_list_lock);
+	spin_lock_irqsave(&thread->co_list_lock, flags);
 	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
 	while (list_entry != &thread->co_list) {
 		co = container_of(list_entry, struct coroutine, co_list_entry);
-		if (atomic_read(&co->signaled) && atomic_cmpxchg(&co->signaled, 1, 0) == 1 && atomic_inc_not_zero(&co->ref_count)) {
-			spin_unlock(&thread->co_list_lock);
+		if (atomic_read(&co->ref_count) && atomic_inc_not_zero(&co->ref_count)) {
+			spin_unlock_irqrestore(&thread->co_list_lock, flags);
 			if (prev_co)
 				coroutine_deref(prev_co);
 			return co;
 		}
 		list_entry = list_entry->next;
 	}
-	spin_unlock(&thread->co_list_lock);
+	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 	if (prev_co)
 		coroutine_deref(prev_co);
 	return NULL;
@@ -159,6 +161,7 @@ static int coroutine_thread_routine(void *data)
 {
 	struct coroutine_thread *thread = (struct coroutine_thread *)data;
 	struct coroutine *co, *next_co;
+	unsigned long flags;
 
 	//trace("co thread 0x%px enter\n", thread);
 
@@ -173,11 +176,13 @@ static int coroutine_thread_routine(void *data)
 			if (co->running)
 				coroutine_enter(co);
 			next_co = coroutine_thread_next_coroutine(thread, co);
-			if (!co->running) {
-				spin_lock(&thread->co_list_lock);
+
+			BUG_ON(atomic_read(&co->signaled) <= 0);
+			if (atomic_dec_and_test(&co->signaled)) {
+				spin_lock_irqsave(&thread->co_list_lock, flags);
 				BUG_ON(list_empty(&co->co_list_entry));
 				list_del_init(&co->co_list_entry);
-				spin_unlock(&thread->co_list_lock);
+				spin_unlock_irqrestore(&thread->co_list_lock, flags);
 				coroutine_deref(co);
 			}
 			co = next_co;
@@ -221,15 +226,16 @@ void coroutine_thread_stop(struct coroutine_thread *thread)
 {
 	struct coroutine *co, *co_tmp;
 	struct list_head co_list;
+	unsigned long flags;
 
 	thread->stopping = true;
 	wake_up_interruptible(&thread->waitq);
 	kthread_stop(thread->task);
 
 	INIT_LIST_HEAD(&co_list);
-	spin_lock(&thread->co_list_lock);
+	spin_lock_irqsave(&thread->co_list_lock, flags);
 	list_splice_init(&thread->co_list, &co_list);
-	spin_unlock(&thread->co_list_lock);
+	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
 	list_for_each_entry_safe(co, co_tmp, &co_list, co_list_entry) {
 		list_del_init(&co->co_list_entry);
