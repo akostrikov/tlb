@@ -1,4 +1,5 @@
 #include "coroutine.h"
+#include "trace.h"
 
 struct coroutine *coroutine_create(struct coroutine_thread *thread)
 {
@@ -12,7 +13,6 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	co->thread = thread;
 	co->stack = kmalloc(COROUTINE_STACK_SIZE, GFP_KERNEL);
 	atomic_set(&co->ref_count, 1);
-	atomic_set(&co->signaled, 0);
 	INIT_LIST_HEAD(&co->co_list_entry);
 	if (!co->stack) {
 		kfree(co);
@@ -24,9 +24,7 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) = COROUTINE_STACK_TOP_MAGIC;
 	*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong)) = (ulong)co;
 
-
-	//trace("co create 0x%px stack 0x%px\n", co, co->stack);
-
+	trace_coroutine_create(co, co->stack, thread);
 	return co;
 }
 
@@ -45,7 +43,7 @@ static void coroutine_delete(struct coroutine *co)
 	BUG_ON(*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) != COROUTINE_STACK_TOP_MAGIC);
 	BUG_ON(atomic_read(&co->ref_count) != 0);
 
-	//trace("co delete 0x%px stack 0x%px\n", co, co->stack);
+	trace_coroutine_delete(co, co->stack, thread);
 
 	spin_lock_irqsave(&thread->co_list_lock, flags);
 	list_del_init(&co->co_list_entry);
@@ -68,8 +66,6 @@ static void coroutine_trampoline(void)
 	struct coroutine *co;
 
 	co = (struct coroutine *)(*(ulong *)(stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong)));
-
-	//trace("co 0x%px rsp 0x%lx stack 0x%lx\n", co, rsp, stack);
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);	
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
@@ -96,8 +92,6 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 	co->ctx.rsp = (ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong);
 	co->running = true;
 
-	//trace("co 0x%px start\n", co);
-
 	coroutine_signal(co);
 }
 
@@ -115,11 +109,10 @@ void coroutine_signal(struct coroutine *co)
 	struct coroutine_thread *thread = co->thread;
 	unsigned long flags;
 
-	atomic_inc(&co->signaled);
 	spin_lock_irqsave(&thread->co_list_lock, flags);
 	if (list_empty(&co->co_list_entry)) {
-		list_add(&co->co_list_entry, &thread->co_list);
 		coroutine_ref(co);
+		list_add_tail(&co->co_list_entry, &thread->co_list);
 	}
 	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
@@ -163,32 +156,28 @@ static int coroutine_thread_routine(void *data)
 	struct coroutine *co, *next_co;
 	unsigned long flags;
 
-	//trace("co thread 0x%px enter\n", thread);
-
 	for (;;) {
 		wait_event_interruptible(thread->waitq, (thread->stopping || atomic_read(&thread->signaled)));
 		if (thread->stopping)
 			break;
 
-		atomic_set(&thread->signaled, 0);
 		co = coroutine_thread_next_coroutine(thread, NULL);
 		while (co != NULL) {
 			if (co->running)
 				coroutine_enter(co);
+
 			next_co = coroutine_thread_next_coroutine(thread, co);
 
-			BUG_ON(atomic_read(&co->signaled) <= 0);
-			if (atomic_dec_and_test(&co->signaled)) {
-				spin_lock_irqsave(&thread->co_list_lock, flags);
-				BUG_ON(list_empty(&co->co_list_entry));
-				list_del_init(&co->co_list_entry);
-				spin_unlock_irqrestore(&thread->co_list_lock, flags);
-				coroutine_deref(co);
-			}
+			spin_lock_irqsave(&thread->co_list_lock, flags);
+			BUG_ON(list_empty(&co->co_list_entry));
+			list_del_init(&co->co_list_entry);
+			spin_unlock_irqrestore(&thread->co_list_lock, flags);
+			coroutine_deref(co);
+
 			co = next_co;
 		}
+		atomic_set(&thread->signaled, 0);
 	}
-	//trace("co thread 0x%px leave\n", thread);
 
 	return 0;
 }

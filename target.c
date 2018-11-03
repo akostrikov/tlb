@@ -1,6 +1,7 @@
 #include "target.h"
 #include "base.h"
 #include "server.h"
+#include "trace.h"
 
 static int tlb_target_init(struct tlb_target *target, const char *host, int port)
 {
@@ -45,6 +46,8 @@ static void tlb_target_con_state_change(struct sock *sk)
 {
 	struct tlb_target_con *con = sk->sk_user_data;
 
+	trace_target_con_state_change(con, sk->sk_state);
+
 	coroutine_signal(con->co);
 }
 
@@ -70,20 +73,23 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 		kfree(con);
 		return r;
 	}
-	
+
+	trace_target_con_create(con, co);
+
 	*pcon = con;
 	return r;
 }
 
 void tlb_target_con_close(struct tlb_target_con *con)
 {
-	//trace("con 0x%px close", con);
-
-	coroutine_deref(con->co);
 	if (con->sock)
 		ksock_release(con->sock);
 	if (con->buf)
 		kfree(con->buf);
+
+	trace_target_con_delete(con, con->co);
+
+	coroutine_deref(con->co);
 	kfree(con);
 }
 

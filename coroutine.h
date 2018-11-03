@@ -34,7 +34,6 @@ struct coroutine {
 	bool running;
 	int magic;
 	atomic_t ref_count;
-	atomic_t signaled;
 };
 
 struct coroutine *coroutine_create(struct coroutine_thread *thread);

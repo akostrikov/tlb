@@ -1,13 +1,12 @@
 #include "base.h"
 #include "server.h"
 #include "coroutine.h"
+#include "trace.h"
 
 void tlb_con_delete(struct tlb_con *con)
 {
 	BUG_ON(!list_empty(&con->list_entry));
 
-	//trace("con 0x%px delete\n", con);
-	
 	if (con->target_con)
 		tlb_target_con_close(con->target_con);
 	if (con->target)
@@ -15,10 +14,13 @@ void tlb_con_delete(struct tlb_con *con)
 	if (con->buf)
 		kfree(con->buf);
 
-	coroutine_deref(con->co);
-
 	if (con->sock)
 		ksock_release(con->sock);
+
+	trace_con_delete(con, con->co);
+
+	coroutine_deref(con->co);
+	kfree(con);
 }
 
 struct tlb_con *tlb_con_create(struct tlb_server *srv)
@@ -37,6 +39,7 @@ struct tlb_con *tlb_con_create(struct tlb_server *srv)
 	}
 	con->srv = srv;
 	INIT_LIST_HEAD(&con->list_entry);
+	trace_con_create(con, con->co);
 	return con;
 }
 
@@ -58,7 +61,7 @@ void tlb_con_state_change(struct sock *sk)
 {
 	struct tlb_con *con = sk->sk_user_data;
 
-	//trace("con 0x%px state %d\n", con, sk->sk_state);
+	trace_con_state_change(con, sk->sk_state);
 	coroutine_signal(con->co);
 }
 
@@ -110,7 +113,7 @@ static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 	int r;
 	bool closed;
 
-	//trace("con 0x%px co 0x%px", con, co);
+	trace_target_con_co_enter(con, co);
 
 	con->buf_len = 16 * 1024;
 	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
@@ -130,7 +133,7 @@ static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 	kfree(con->buf);
 	con->buf = NULL;
 out:
-	//trace("con 0x%px co 0x%px r %d", con, co, r);
+	trace_target_con_co_leave(con, co, r);
 	return ERR_PTR(r);
 }
 
@@ -144,7 +147,7 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 
 	BUG_ON(con->co != co);
 
-	//trace("con 0x%px co 0x%px\n", con, co);
+	trace_con_co_enter(con, co);
 
 	con->buf_len = 16 * 1024;
 	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
@@ -181,12 +184,12 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 	}
 
 	if (r)
-		coroutine_cancel(target_con_co);
+		coroutine_cancel(con->target_con->co);
 	else {
 		void *ret;
 		
-		coroutine_cancel(target_con_co);
-		ret = target_con_co->ret;
+		coroutine_cancel(con->target_con->co);
+		ret = con->target_con->co->ret;
 		if (IS_ERR(ret))
 				r = PTR_ERR(ret);
 	}
@@ -200,8 +203,7 @@ free_buf:
 	kfree(con->buf);
 	con->buf = NULL;
 out:
-	//trace("con 0x%px co 0x%px r %d", con, co, r);
-
+	trace_con_co_leave(con, co, r);
 	tlb_server_unlink_con(srv, con);
 	tlb_con_delete(con);
 	return NULL;

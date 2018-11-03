@@ -1,2 +1,11 @@
 *.swp
 *.mk
+*.o
+*.o.cmd
+*.ko.cmd
+*.mod.c
+*.ko
+modules.order
+Module.symvers
+ftrace/
+.tmp_versions/

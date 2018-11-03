@@ -8,28 +8,28 @@ static int __init tlb_init(void)
 {
 	int r;
 
-	trace("initing\n");
+	pr_info("tlb: initing\n");
 
 	tlb_server_init(&g_context.srv);
 	r = tlb_sysfs_init(&g_context.kobj_holder, fs_kobj, &tlb_ktype, "%s", "tlb");
 
-	trace("inited r %d\n", r);
+	pr_info("tlb: inited r %d\n", r);
 	return r;
 }
 
 static void __exit tlb_exit(void)
 {
-	trace("exiting\n");
+	pr_info("tlb: exiting\n");
 
 	tlb_sysfs_deinit(&g_context.kobj_holder);
 	tlb_server_stop(&g_context.srv);
 
-	trace("exited\n");
+	pr_info("tlb: exited\n");
 }
 
 module_init(tlb_init)
 module_exit(tlb_exit)
 
 MODULE_AUTHOR("Andrey Smetanin <irqlevel@gmail.com>");
-MODULE_DESCRIPTION("");
+MODULE_DESCRIPTION("Tcp connection based load balancer");
 MODULE_LICENSE("GPL");

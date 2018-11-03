@@ -22,10 +22,3 @@
 #include <linux/string.h>
 #include <linux/module.h>
 #include <linux/sched/task.h>
-
-#define trace(fmt, ...)    \
-                pr_info("tlb: %d: %s(),%d: " fmt, current->pid, __FUNCTION__, __LINE__, ##__VA_ARGS__)
-
-#define trace_err(fmt, ...)    \
-                pr_err("tlb: %d: %s(),%d: " fmt, current->pid, __FUNCTION__, __LINE__, ##__VA_ARGS__)
-

@@ -307,7 +307,7 @@ static int ksock_dns_resolve(char *name, struct sockaddr_storage *ss)
 	if (ip_len > 0)
 		r = ksock_pton(ip_addr, ip_len, ss);
 	else {
-		trace_err("dns_query %s failed error %d\n", name, ip_len);
+		pr_err("tlb: dns_query %s failed error %d\n", name, ip_len);
 		r = -ESRCH;
 	}
 	kfree(ip_addr);

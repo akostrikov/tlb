@@ -28,7 +28,7 @@ static int tlb_server_listen_thread_routine(void *arg)
 
 		r = ksock_accept(&sock, srv->listen_sock, &callbacks);
 		if (r) {
-			trace_err("accept r %d\n", r);
+			pr_err("tlb: accept r %d\n", r);
 			tlb_con_delete(con);
 			continue;
 		}
@@ -72,7 +72,7 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	for (i = 0; i < 5; i++) {
 		r = ksock_listen_host(&srv->listen_sock, srv->host, srv->port, 5);
 		if (r) {
-			trace_err("ksock_listen r %d\n", r);
+			pr_err("tlb: ksock_listen r %d\n", r);
 			if (r == -EADDRINUSE) {
 				msleep_interruptible(100);
 				continue;
