@@ -19,7 +19,9 @@ struct tlb_server {
 
 	struct task_struct *listen_thread;
 	struct socket *listen_sock;
-	struct coroutine_thread con_thread;
+	struct coroutine_thread con_thread[NR_CPUS];
+	int nr_con_thread;
+	atomic_t next_con_thread;
 	int state;
 	struct mutex lock;
 	bool listen_thread_stopping;

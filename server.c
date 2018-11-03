@@ -62,6 +62,8 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	}
 	srv->state = TLB_SRV_STARTING;
 
+	srv->nr_con_thread = 0;
+	atomic_set(&srv->next_con_thread, 0);
 	tlb_server_init_targets(srv);
 	snprintf(srv->host, ARRAY_SIZE(srv->host), "%s", host);
 	srv->port = port;
@@ -81,9 +83,13 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	if (r)
 		goto deinit_targets;
 
-	r = coroutine_thread_start(&srv->con_thread);
-	if (r)
-		goto release_listen_sock;
+	for (i = 0; i < num_online_cpus(); i++) {
+		r = coroutine_thread_start(&srv->con_thread[i]);
+		if (r)
+			goto stop_con_coroutine;
+
+		srv->nr_con_thread++;
+	}
 
 	srv->listen_thread = kthread_create(tlb_server_listen_thread_routine, srv, "tlb_listen");
 	if (IS_ERR(srv->listen_thread)) {
@@ -98,8 +104,9 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	return 0;
 
 stop_con_coroutine:
-	coroutine_thread_stop(&srv->con_thread);
-release_listen_sock:
+	for (i = 0; i < srv->nr_con_thread; i++)
+		coroutine_thread_stop(&srv->con_thread[i]);
+
 	ksock_release(srv->listen_sock);
 deinit_targets:
 	tlb_server_deinit_targets(srv);
@@ -112,6 +119,7 @@ unlock:
 int tlb_server_stop(struct tlb_server *srv)
 {
 	struct tlb_con *con, *tmp;
+	int i;
 
 	mutex_lock(&srv->lock);
 	if (srv->state != TLB_SRV_RUNNING) {
@@ -128,7 +136,9 @@ int tlb_server_stop(struct tlb_server *srv)
 	put_task_struct(srv->listen_thread);
 	srv->listen_thread_stopping = false;
 
-	coroutine_thread_stop(&srv->con_thread);
+	for (i = 0; i < srv->nr_con_thread; i++)
+		coroutine_thread_stop(&srv->con_thread[i]);
+
 	ksock_release(srv->listen_sock);
 
 	list_for_each_entry_safe(con, tmp, &srv->con_list, list_entry) {

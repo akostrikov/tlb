@@ -29,7 +29,8 @@ struct tlb_con *tlb_con_create(struct tlb_server *srv)
 	if (!con)
 		return NULL;
 	memset(con, 0, sizeof(*con));
-	con->co = coroutine_create(&srv->con_thread);
+	atomic_inc(&srv->next_con_thread);
+	con->co = coroutine_create(&srv->con_thread[atomic_read(&srv->next_con_thread) % srv->nr_con_thread]);
 	if (!con->co) {
 		kfree(con);
 		return NULL;
