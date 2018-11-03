@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
+	uuid "github.com/satori/go.uuid"
 )
 
 type Service struct {
@@ -20,6 +21,7 @@ type Service struct {
 	errorChannel    chan error
 	httpServer      *http.Server
 	debugHttpServer *http.Server
+	serverId        string
 }
 
 func (svc *Service) stop() {
@@ -67,6 +69,7 @@ type BaseRequest struct {
 type BaseResponse struct {
 	RequestId string `json:"requestId"`
 	Error     string `json:"error"`
+	ServerId  string `json:"serverId"`
 }
 
 var (
@@ -82,7 +85,7 @@ func completeRequest(w http.ResponseWriter, requestId string, err error, v inter
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
 		}
-		err = json.NewEncoder(w).Encode(&BaseResponse{RequestId: requestId, Error: err.Error()})
+		err = json.NewEncoder(w).Encode(&BaseResponse{RequestId: requestId, Error: err.Error(), ServerId: g_Svc.serverId})
 		if err != nil {
 			panic(fmt.Sprintf("encode error failed, error %v", err))
 		}
@@ -93,6 +96,7 @@ func completeRequest(w http.ResponseWriter, requestId string, err error, v inter
 			resp := v.(*BaseResponse)
 			resp.Error = ""
 			resp.RequestId = requestId
+			resp.ServerId = g_Svc.serverId
 		default:
 			panic(fmt.Sprintf("unknown type %v", tv))
 		}
@@ -168,6 +172,8 @@ func getDebugHttpHandler() *mux.Router {
 	return r
 }
 
+var g_Svc Service
+
 func main() {
 	var address string
 	var debugAddress string
@@ -180,7 +186,13 @@ func main() {
 	log.SetFlags(log.Ltime | log.Ldate | log.LUTC | log.Lmicroseconds | log.Lshortfile)
 	log.Printf("address %s debugAddress %s\n", address, debugAddress)
 
-	svc := &Service{}
+	serverId, err := uuid.NewV4()
+	if err != nil {
+		panic(err)
+	}
+
+	svc := &g_Svc
+	svc.serverId = serverId.String()
 	svc.signalChannel = make(chan os.Signal, 1)
 	svc.errorChannel = make(chan error, 1)
 	signal.Notify(svc.signalChannel, syscall.SIGINT, syscall.SIGTERM)
