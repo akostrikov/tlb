@@ -3,6 +3,16 @@
 #include "base.h"
 #include "setjmp_64.h"
 
+#define COROUTINE_MAGIC			0xCBDACBDA
+#define COROUTINE_STACK_BOTTOM_MAGIC	0x0BEDABEDAUL
+#define COROUTINE_STACK_TOP_MAGIC		0x0CCCCCCCCUL
+
+#define COROUTINE_PAGE_SIZE 4096UL
+#define COROUTINE_PAGE_SHIFT 12UL
+
+#define COROUTINE_STACK_SHIFT ((ulong)(COROUTINE_PAGE_SHIFT + 2))
+#define COROUTINE_STACK_SIZE (1UL << COROUTINE_STACK_SHIFT)
+
 struct coroutine_thread {
 	struct task_struct *task;
 	struct kernel_jmp_buf ctx;
@@ -35,9 +45,20 @@ void coroutine_deref(struct coroutine *co);
 
 void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, void* arg), void *arg);
 
-void coroutine_yield(struct coroutine *co);
+static void __always_inline coroutine_yield(struct coroutine *co)
+{
+	BUG_ON(co->magic != COROUTINE_MAGIC);
+	
+	if (kernel_setjmp(&co->ctx) == 0)
+		kernel_longjmp(&co->thread->ctx, 0x1);
+}
+
 
 void coroutine_signal(struct coroutine *co);
+
+void coroutine_cancel(struct coroutine *co);
+
+void* coroutine_wait(struct coroutine *self, struct coroutine *co);
 
 int coroutine_thread_start(struct coroutine_thread *thread);
 

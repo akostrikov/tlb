@@ -3,12 +3,18 @@
 #include "coroutine.h"
 
 struct tlb_server;
+struct tlb_target;
+struct tlb_target_con;
 
 struct tlb_con {
 	struct socket *sock;
 	struct coroutine *co;
 	struct tlb_server *srv;
 	struct list_head list_entry;
+	char *buf;
+	int buf_len;
+	struct tlb_target *target;
+	struct tlb_target_con *target_con;
 };
 
 struct tlb_con *tlb_con_create(struct tlb_server *srv);

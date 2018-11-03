@@ -14,6 +14,9 @@ struct tlb_target {
 struct tlb_target_con {
 	struct socket *sock;
 	struct coroutine *co;
+	struct socket *src_sock;
+	char *buf;
+	int buf_len;
 };
 
 void tlb_target_put(struct tlb_target *target);

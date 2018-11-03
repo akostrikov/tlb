@@ -166,31 +166,26 @@ void ksock_release(struct socket *sock)
 
 int ksock_send(struct socket *sock, void *buf, int len)
 {
-	struct iovec iov;
+	struct kvec iov = {buf, len};
 	struct msghdr msg;
-
-	iov.iov_base = buf;
-	iov.iov_len = len;
 
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL | MSG_EOR;
-	iov_iter_init(&msg.msg_iter, WRITE, &iov, 1, len);
+	iov_iter_kvec(&msg.msg_iter, WRITE | ITER_KVEC, &iov, 1, len);
 
 	return sock_sendmsg(sock, &msg);
 }
 
 int ksock_recv(struct socket *sock, void *buf, int len)
 {
-	struct iovec iov;
+	struct kvec iov = {buf, len};
 	struct msghdr msg;
-
-	iov.iov_base = buf;
-	iov.iov_len = len;
 
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
-	iov_iter_init(&msg.msg_iter, READ, &iov, 1, len);
+	iov_iter_kvec(&msg.msg_iter, READ | ITER_KVEC, &iov, 1, len);
 
+	//trace("msg 0x%px iov 0x%px\n", &msg, &iov);
 	return sock_recvmsg(sock, &msg, msg.msg_flags);
 }
 

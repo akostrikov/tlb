@@ -57,7 +57,8 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 	con = kmalloc(sizeof(*con), GFP_KERNEL);
 	if (!con)
 		return -ENOMEM;
-
+	memset(con, 0, sizeof(*con));
+	coroutine_ref(co);
 	con->co = co;
 	callbacks.user_data = con;
 	callbacks.data_ready = tlb_target_con_data_ready;
@@ -76,7 +77,13 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 
 void tlb_target_con_close(struct tlb_target_con *con)
 {
-	ksock_release(con->sock);
+	//trace("con 0x%px close", con);
+
+	coroutine_deref(con->co);
+	if (con->sock)
+		ksock_release(con->sock);
+	if (con->buf)
+		kfree(con->buf);
 	kfree(con);
 }
 

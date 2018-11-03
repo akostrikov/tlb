@@ -1,15 +1,5 @@
 #include "coroutine.h"
 
-#define COROUTINE_MAGIC			0xCBDACBDA
-#define COROUTINE_STACK_BOTTOM_MAGIC	0x0BEDABEDAUL
-#define COROUTINE_STACK_TOP_MAGIC		0x0CCCCCCCCUL
-
-#define COROUTINE_PAGE_SIZE 4096UL
-#define COROUTINE_PAGE_SHIFT 12UL
-
-#define COROUTINE_STACK_SHIFT ((ulong)(COROUTINE_PAGE_SHIFT + 2))
-#define COROUTINE_STACK_SIZE (1UL << COROUTINE_STACK_SHIFT)
-
 struct coroutine *coroutine_create(struct coroutine_thread *thread)
 {
 	struct coroutine *co;
@@ -35,7 +25,7 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong)) = (ulong)co;
 
 
-	trace("co create 0x%px stack 0x%px\n", co, co->stack);
+	//trace("co create 0x%px stack 0x%px\n", co, co->stack);
 
 	return co;
 }
@@ -54,7 +44,7 @@ static void coroutine_delete(struct coroutine *co)
 	BUG_ON(*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) != COROUTINE_STACK_TOP_MAGIC);
 	BUG_ON(atomic_read(&co->ref_count) != 0);
 
-	trace("co delete 0x%px stack 0x%px\n", co, co->stack);
+	//trace("co delete 0x%px stack 0x%px\n", co, co->stack);
 
 	spin_lock(&thread->co_list_lock);
 	list_del_init(&co->co_list_entry);
@@ -70,15 +60,6 @@ void coroutine_deref(struct coroutine *co)
 			coroutine_delete(co);
 }
 
-
-void coroutine_yield(struct coroutine *co)
-{
-	BUG_ON(co->magic != COROUTINE_MAGIC);
-	
-	if (kernel_setjmp(&co->ctx) == 0)
-		kernel_longjmp(&co->thread->ctx, 0x1);
-}
-
 static void coroutine_trampoline(void)
 {
 	ulong rsp = kernel_get_rsp();
@@ -87,7 +68,7 @@ static void coroutine_trampoline(void)
 
 	co = (struct coroutine *)(*(ulong *)(stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong)));
 
-	trace("co 0x%px rsp 0x%lx stack 0x%lx\n", co, rsp, stack);
+	//trace("co 0x%px rsp 0x%lx stack 0x%lx\n", co, rsp, stack);
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);	
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
@@ -99,6 +80,7 @@ static void coroutine_trampoline(void)
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
 	BUG_ON(*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) != COROUTINE_STACK_TOP_MAGIC);
 
+	mb();
 	co->running = false;
 	coroutine_yield(co);
 }
@@ -115,7 +97,7 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 	co->ctx.rsp = (ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong);
 	co->running = true;
 
-	trace("co 0x%px start\n", co);
+	//trace("co 0x%px start\n", co);
 
 	coroutine_ref(co);
 	spin_lock(&thread->co_list_lock);
@@ -125,7 +107,7 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 	coroutine_signal(co);
 }
 
-static void coroutine_enter(struct coroutine *co)
+static __always_inline void coroutine_enter(struct coroutine *co)
 {
 	BUG_ON(co->magic != COROUTINE_MAGIC);
 	BUG_ON(!co->running);
@@ -139,6 +121,12 @@ void coroutine_signal(struct coroutine *co)
 	atomic_cmpxchg(&co->signaled, 0, 1);
 	atomic_inc(&co->thread->signaled);
 	wake_up_interruptible(&co->thread->waitq);
+}
+
+void coroutine_cancel(struct coroutine *co)
+{
+	co->running = false;
+	coroutine_signal(co);
 }
 
 static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread *thread, struct coroutine *prev_co)
@@ -169,7 +157,7 @@ static int coroutine_thread_routine(void *data)
 	struct coroutine_thread *thread = (struct coroutine_thread *)data;
 	struct coroutine *co, *next_co;
 
-	trace("co thread 0x%px enter\n", thread);
+	//trace("co thread 0x%px enter\n", thread);
 
 	for (;;) {
 		wait_event_interruptible(thread->waitq, (thread->stopping || atomic_read(&thread->signaled)));
@@ -179,7 +167,8 @@ static int coroutine_thread_routine(void *data)
 		atomic_set(&thread->signaled, 0);
 		co = coroutine_thread_next_coroutine(thread, NULL);
 		while (co != NULL) {
-			coroutine_enter(co);
+			if (co->running)
+				coroutine_enter(co);
 			next_co = coroutine_thread_next_coroutine(thread, co);
 			if (!co->running) {
 				spin_lock(&thread->co_list_lock);
@@ -191,9 +180,16 @@ static int coroutine_thread_routine(void *data)
 			co = next_co;
 		}
 	}
-	trace("co thread 0x%px leave\n", thread);
+	//trace("co thread 0x%px leave\n", thread);
 
 	return 0;
+}
+
+void* coroutine_wait(struct coroutine *self, struct coroutine *co)
+{
+	while (co->running)
+		coroutine_yield(self);
+	return co->ret;
 }
 
 int coroutine_thread_start(struct coroutine_thread *thread)

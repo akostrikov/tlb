@@ -6,8 +6,17 @@ void tlb_con_delete(struct tlb_con *con)
 {
 	BUG_ON(!list_empty(&con->list_entry));
 
-	trace("con 0x%px delete\n", con);
+	//trace("con 0x%px delete\n", con);
+	
+	if (con->target_con)
+		tlb_target_con_close(con->target_con);
+	if (con->target)
+		tlb_target_put(con->target);
+	if (con->buf)
+		kfree(con->buf);
+
 	coroutine_deref(con->co);
+
 	if (con->sock)
 		ksock_release(con->sock);
 }
@@ -48,6 +57,7 @@ void tlb_con_state_change(struct sock *sk)
 {
 	struct tlb_con *con = sk->sk_user_data;
 
+	//trace("con 0x%px state %d\n", con, sk->sk_state);
 	coroutine_signal(con->co);
 }
 
@@ -57,7 +67,9 @@ static int copy_socket_coroutine(struct coroutine *co, struct socket *from, stru
 
 	*closed = false;
 	for (;;) {
+		//trace("co 0x%px ksock_recv buf 0x%px \n", co, buf);
 		r = ksock_recv(from, buf, buf_len);
+		//trace("co 0x%px ksock_recv r %d\n", co, r);
 		if (r < 0) {
 			if (r == -EAGAIN) {
 				coroutine_yield(co);
@@ -72,7 +84,9 @@ static int copy_socket_coroutine(struct coroutine *co, struct socket *from, stru
 		received = r;
 		sent = 0;
 		while (sent < received) {
-			r = ksock_send(to, (char *)buf + sent, received - sent);
+			//trace("co 0x%px ksock_send\n", co);
+			r = ksock_send(to, buf + sent, received - sent);
+			//trace("co 0x%px ksock_send r %d\n", co, r);
 			if (r < 0) {
 				if (r == -EAGAIN) {
 					coroutine_yield(co);
@@ -89,60 +103,106 @@ static int copy_socket_coroutine(struct coroutine *co, struct socket *from, stru
 	return r;
 }
 
-static void *tlb_con_coroutine(struct coroutine *co, void *arg)
+static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 {
-	struct tlb_con *con = (struct tlb_con *)arg;
-	struct tlb_server *srv = con->srv;
-	struct tlb_target *target;
-	struct tlb_target_con *target_con;
+	struct tlb_target_con *con = arg;
 	int r;
-	char *buf;
-	int buf_len;
 	bool closed;
 
-	BUG_ON(con->co != co);
+	//trace("con 0x%px co 0x%px", con, co);
 
-	trace("con 0x%px co 0x%px\n", con, co);
-
-	buf_len = 16 * 1024;
-	buf = kmalloc(buf_len, GFP_KERNEL);
-	if (!buf) {
+	con->buf_len = 16 * 1024;
+	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
+	if (!con->buf) {
 		r = -ENOMEM;
 		goto out;
 	}
 
-	target = tlb_server_select_target(srv);
-	if (!target) {
-		r = -ENOENT;
+	for (;;) {
+		r = copy_socket_coroutine(co, con->sock, con->src_sock, con->buf, con->buf_len, &closed);
+		if (r)
+			break;
+		if (closed)
+			break;
+	}
+
+	kfree(con->buf);
+	con->buf = NULL;
+out:
+	//trace("con 0x%px co 0x%px r %d", con, co, r);
+	return ERR_PTR(r);
+}
+
+static void *tlb_con_coroutine(struct coroutine *co, void *arg)
+{
+	struct tlb_con *con = (struct tlb_con *)arg;
+	struct tlb_server *srv = con->srv;
+	struct coroutine *target_con_co;
+	int r;
+	bool closed;
+
+	BUG_ON(con->co != co);
+
+	//trace("con 0x%px co 0x%px\n", con, co);
+
+	con->buf_len = 16 * 1024;
+	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
+	if (!con->buf) {
+		r = -ENOMEM;
 		goto out;
 	}
 
-	r = tlb_target_connect(target, co, &target_con);
+	con->target = tlb_server_select_target(srv);
+	if (!con->target) {
+		r = -ENOENT;
+		goto free_buf;
+	}
+
+	target_con_co = coroutine_create(co->thread);
+	if (!target_con_co) {
+		r = -ENOMEM;
+		goto put_target;
+	}
+
+	r = tlb_target_connect(con->target, target_con_co, &con->target_con);
+	coroutine_deref(target_con_co);
 	if (r)
 		goto put_target;
 
+	con->target_con->src_sock = con->sock;
+	coroutine_start(target_con_co, tlb_target_con_coroutine, con->target_con);
 	for (;;) {
-		r = copy_socket_coroutine(co, con->sock, target_con->sock, buf, buf_len, &closed);
+		r = copy_socket_coroutine(co, con->sock, con->target_con->sock, con->buf, con->buf_len, &closed);
 		if (r)
 			break;
 		if (closed)
-			break;
-		r = copy_socket_coroutine(co, target_con->sock, con->sock, buf, buf_len, &closed);
-		if (r)
-			break;
-		if (closed)
-			break;
+			break;	
 	}
 
-	tlb_target_con_close(target_con);
+	if (r)
+		coroutine_cancel(target_con_co);
+	else {
+		void *ret;
+		
+		coroutine_cancel(target_con_co);
+		ret = target_con_co->ret;
+		if (IS_ERR(ret))
+				r = PTR_ERR(ret);
+	}
+
+	tlb_target_con_close(con->target_con);
+	con->target_con = NULL;
 put_target:
-	tlb_target_put(target);
+	tlb_target_put(con->target);
+	con->target = NULL;
+free_buf:
+	kfree(con->buf);
+	con->buf = NULL;
 out:
-	trace("con 0x%px co 0x%px r %d", con, co, r);
+	//trace("con 0x%px co 0x%px r %d", con, co, r);
 
 	tlb_server_unlink_con(srv, con);
 	tlb_con_delete(con);
-	kfree(buf);
 	return NULL;
 }
 
