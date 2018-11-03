@@ -1,7 +1,7 @@
 # tlb - tcp connection based load balancer
 
 #### Prerequisites:
-```CONFIG_DEBUG_STACKOVERFLOW=n``` to allow coroutines in linux kernel mode :-)
+```CONFIG_DEBUG_STACKOVERFLOW=n``` to allow coroutines in Linux kernel mode :-)
 
 #### Usage:
 ```
