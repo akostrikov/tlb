@@ -118,9 +118,12 @@ static __always_inline void coroutine_enter(struct coroutine *co)
 
 void coroutine_signal(struct coroutine *co)
 {
+	struct coroutine_thread *thread = co->thread;
+
 	atomic_cmpxchg(&co->signaled, 0, 1);
-	atomic_inc(&co->thread->signaled);
-	wake_up_interruptible(&co->thread->waitq);
+
+	atomic_inc(&thread->signaled);
+	wake_up_interruptible(&thread->waitq);
 }
 
 void coroutine_cancel(struct coroutine *co)
@@ -138,7 +141,7 @@ static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread
 	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
 	while (list_entry != &thread->co_list) {
 		co = container_of(list_entry, struct coroutine, co_list_entry);
-		if (atomic_cmpxchg(&co->signaled, 1, 0) == 1 && atomic_inc_not_zero(&co->ref_count)) {
+		if (atomic_read(&co->signaled) && atomic_cmpxchg(&co->signaled, 1, 0) == 1 && atomic_inc_not_zero(&co->ref_count)) {
 			spin_unlock(&thread->co_list_lock);
 			if (prev_co)
 				coroutine_deref(prev_co);
