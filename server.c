@@ -51,6 +51,7 @@ void tlb_server_init(struct tlb_server *srv)
 int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 {
 	int r, i;
+	unsigned int cpu;
 
 	if (strlen(host) >= ARRAY_SIZE(srv->host) || port <= 0 || port > 65535)
 		return -EINVAL;
@@ -70,7 +71,7 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	INIT_LIST_HEAD(&srv->con_list);
 	spin_lock_init(&srv->con_list_lock);
 	for (i = 0; i < 5; i++) {
-		r = ksock_listen_host(&srv->listen_sock, srv->host, srv->port, 5);
+		r = ksock_listen_host(&srv->listen_sock, srv->host, srv->port, SOMAXCONN);
 		if (r) {
 			pr_err("tlb: ksock_listen r %d\n", r);
 			if (r == -EADDRINUSE) {
@@ -83,8 +84,8 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	if (r)
 		goto deinit_targets;
 
-	for (i = 0; i < num_online_cpus(); i++) {
-		r = coroutine_thread_start(&srv->con_thread[i]);
+	for_each_cpu(cpu, cpu_online_mask) {
+		r = coroutine_thread_start(&srv->con_thread[srv->nr_con_thread], "tlb_coroutine", cpu);
 		if (r)
 			goto stop_con_coroutine;
 

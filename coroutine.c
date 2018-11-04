@@ -13,6 +13,7 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	co->thread = thread;
 	co->stack = kmalloc(COROUTINE_STACK_SIZE, GFP_KERNEL);
 	atomic_set(&co->ref_count, 1);
+	atomic_set(&co->signaled, 0);
 	INIT_LIST_HEAD(&co->co_list_entry);
 	if (!co->stack) {
 		kfree(co);
@@ -109,6 +110,7 @@ void coroutine_signal(struct coroutine *co)
 	struct coroutine_thread *thread = co->thread;
 	unsigned long flags;
 
+	atomic_inc(&co->signaled);
 	spin_lock_irqsave(&thread->co_list_lock, flags);
 	if (list_empty(&co->co_list_entry)) {
 		coroutine_ref(co);
@@ -168,11 +170,19 @@ static int coroutine_thread_routine(void *data)
 
 			next_co = coroutine_thread_next_coroutine(thread, co);
 
-			spin_lock_irqsave(&thread->co_list_lock, flags);
-			BUG_ON(list_empty(&co->co_list_entry));
-			list_del_init(&co->co_list_entry);
-			spin_unlock_irqrestore(&thread->co_list_lock, flags);
-			coroutine_deref(co);
+			if (atomic_dec_and_test(&co->signaled)) {
+				spin_lock_irqsave(&thread->co_list_lock, flags);
+				BUG_ON(list_empty(&co->co_list_entry));
+				list_del_init(&co->co_list_entry);
+				spin_unlock_irqrestore(&thread->co_list_lock, flags);
+				coroutine_deref(co);
+			} else {
+				spin_lock_irqsave(&thread->co_list_lock, flags);
+				BUG_ON(list_empty(&co->co_list_entry));
+				list_del_init(&co->co_list_entry);
+				list_add_tail(&co->co_list_entry, &thread->co_list);
+				spin_unlock_irqrestore(&thread->co_list_lock, flags);
+			}
 
 			co = next_co;
 		}
@@ -189,7 +199,7 @@ void* coroutine_wait(struct coroutine *self, struct coroutine *co)
 	return co->ret;
 }
 
-int coroutine_thread_start(struct coroutine_thread *thread)
+int coroutine_thread_start(struct coroutine_thread *thread, const char *name, unsigned int cpu)
 {
 	struct task_struct *task;
 
@@ -200,12 +210,14 @@ int coroutine_thread_start(struct coroutine_thread *thread)
 	thread->stopping = false;
 	atomic_set(&thread->signaled, 0);
 
-	task = kthread_create(coroutine_thread_routine, thread, "coroutine");
+	task = kthread_create(coroutine_thread_routine, thread, "%s-%u", name, cpu);
 	if (IS_ERR(task))
 		return PTR_ERR(task);
 
+	kthread_bind(task, cpu);
 	get_task_struct(task);
 	thread->task = task;
+	thread->cpu = cpu;
 	wake_up_process(task);
 
 	return 0;

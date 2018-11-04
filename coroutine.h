@@ -21,6 +21,7 @@ struct coroutine_thread {
 	struct wait_queue_head waitq;
 	bool stopping;
 	atomic_t signaled;
+	unsigned int cpu;
 };
 
 struct coroutine {
@@ -34,6 +35,7 @@ struct coroutine {
 	bool running;
 	int magic;
 	atomic_t ref_count;
+	atomic_t signaled;
 };
 
 struct coroutine *coroutine_create(struct coroutine_thread *thread);
@@ -59,6 +61,6 @@ void coroutine_cancel(struct coroutine *co);
 
 void* coroutine_wait(struct coroutine *self, struct coroutine *co);
 
-int coroutine_thread_start(struct coroutine_thread *thread);
+int coroutine_thread_start(struct coroutine_thread *thread, const char *name, unsigned int cpu);
 
 void coroutine_thread_stop(struct coroutine_thread *thread);
