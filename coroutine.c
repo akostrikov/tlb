@@ -134,6 +134,9 @@ static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread
 	struct coroutine *co;
 	unsigned long flags;
 
+	if (prev_co == NULL && list_empty(&thread->co_list))
+		return NULL;
+
 	spin_lock_irqsave(&thread->co_list_lock, flags);
 	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
 	while (list_entry != &thread->co_list) {
@@ -163,32 +166,34 @@ static int coroutine_thread_routine(void *data)
 		if (thread->stopping)
 			break;
 
-		co = coroutine_thread_next_coroutine(thread, NULL);
-		while (co != NULL) {
-			if (co->running)
-				coroutine_enter(co);
+		for (;;) {
+			co = coroutine_thread_next_coroutine(thread, NULL);
+			while (co != NULL) {
+				if (co->running)
+					coroutine_enter(co);
 
-			next_co = coroutine_thread_next_coroutine(thread, co);
+				next_co = coroutine_thread_next_coroutine(thread, co);
 
-			if (atomic_dec_and_test(&co->signaled)) {
-				spin_lock_irqsave(&thread->co_list_lock, flags);
-				BUG_ON(list_empty(&co->co_list_entry));
-				list_del_init(&co->co_list_entry);
-				spin_unlock_irqrestore(&thread->co_list_lock, flags);
-				coroutine_deref(co);
-			} else {
-				spin_lock_irqsave(&thread->co_list_lock, flags);
-				BUG_ON(list_empty(&co->co_list_entry));
-				list_del_init(&co->co_list_entry);
-				list_add_tail(&co->co_list_entry, &thread->co_list);
-				spin_unlock_irqrestore(&thread->co_list_lock, flags);
+				if (atomic_dec_and_test(&co->signaled)) {
+					spin_lock_irqsave(&thread->co_list_lock, flags);
+					BUG_ON(list_empty(&co->co_list_entry));
+					list_del_init(&co->co_list_entry);
+					spin_unlock_irqrestore(&thread->co_list_lock, flags);
+					coroutine_deref(co);
+				} else {
+					spin_lock_irqsave(&thread->co_list_lock, flags);
+					BUG_ON(list_empty(&co->co_list_entry));
+					list_del_init(&co->co_list_entry);
+					list_add_tail(&co->co_list_entry, &thread->co_list);
+					spin_unlock_irqrestore(&thread->co_list_lock, flags);
+				}
+
+				co = next_co;
 			}
-
-			co = next_co;
+			if (atomic_dec_and_test(&thread->signaled))
+				break;
 		}
-		atomic_set(&thread->signaled, 0);
 	}
-
 	return 0;
 }
 

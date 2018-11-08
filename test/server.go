@@ -27,7 +27,9 @@ type Service struct {
 func (svc *Service) stop() {
 	log.Printf("stopping\n")
 	svc.httpServer.Shutdown(context.Background())
-	svc.debugHttpServer.Shutdown(context.Background())
+	if svc.debugHttpServer != nil {
+		svc.debugHttpServer.Shutdown(context.Background())
+	}
 	log.Printf("stopped\n")
 }
 
@@ -179,7 +181,7 @@ func main() {
 	var debugAddress string
 
 	flag.StringVar(&address, "address", "127.0.0.1:8080", "address")
-	flag.StringVar(&debugAddress, "debugAddress", "127.0.0.1:9090", "debug address")
+	flag.StringVar(&debugAddress, "debugAddress", "", "debug address")
 	flag.Parse()
 
 	log.SetOutput(os.Stdout)
@@ -197,10 +199,14 @@ func main() {
 	svc.errorChannel = make(chan error, 1)
 	signal.Notify(svc.signalChannel, syscall.SIGINT, syscall.SIGTERM)
 	svc.httpServer = &http.Server{Addr: address, Handler: getHttpHandler()}
-	svc.debugHttpServer = &http.Server{Addr: debugAddress, Handler: getDebugHttpHandler()}
+	if debugAddress != "" {
+		svc.debugHttpServer = &http.Server{Addr: debugAddress, Handler: getDebugHttpHandler()}
+	}
 
 	go svc.serverHttp()
-	go svc.serverDebugHttp()
+	if svc.debugHttpServer != nil {
+		go svc.serverDebugHttp()
+	}
 
 	svc.runEventLoop()
 }

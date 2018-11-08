@@ -1,9 +1,4 @@
-#!/bin/bash -xv
-
-WDIR=./ftrace
-
-rm -rf $WDIR
-mkdir -p $WDIR
+#!/bin/bash
 
 echo 0 > /sys/kernel/debug/tracing/tracing_on
 echo 'nop' > /sys/kernel/debug/tracing/current_tracer
