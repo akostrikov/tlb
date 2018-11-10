@@ -41,6 +41,10 @@ int ksock_ioctl(struct socket *sock, int cmd, unsigned long arg);
 
 int ksock_set_nodelay(struct socket *sock, bool no_delay);
 
-int ksock_connect_host(struct socket **sockp, char *host, u16 port, struct ksock_callbacks *callbacks);
+int ksock_resolve_addr(const char *host, u16 port, struct sockaddr_storage *addr);
+
+int ksock_connect_host(struct socket **sockp, const char *host, u16 port, struct ksock_callbacks *callbacks);
+
+int ksock_connect_addr(struct socket **sockp, struct sockaddr_storage *addr, struct ksock_callbacks *callbacks);
 
 int ksock_listen_host(struct socket **sockp, char *host, int port, int backlog);

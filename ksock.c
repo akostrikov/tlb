@@ -94,6 +94,23 @@ int ksock_set_nodelay(struct socket *sock, bool no_delay)
 	return error;
 }
 
+int ksock_set_reuse_addr(struct socket *sock, bool reuse)
+{
+	int r;
+	int option;
+	mm_segment_t oldmm;
+
+	option = (reuse) ? 1 : 0;
+
+	oldmm = get_fs();
+	set_fs(KERNEL_DS);
+	option = 1;
+	r = sock_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+		(char *)&option, sizeof(option));
+	set_fs(oldmm);
+	return r;
+}
+
 int ksock_set_sendbufsize(struct socket *sock, int size)
 {
 	int option = size;
@@ -276,7 +293,7 @@ static void ksock_addr_set_port(struct sockaddr_storage *ss, int p)
 	}
 }
 
-static int ksock_pton(char *ip, int ip_len, struct sockaddr_storage *ss)
+static int ksock_pton(const char *ip, int ip_len, struct sockaddr_storage *ss)
 {
 	struct sockaddr_in *in4 = (struct sockaddr_in *) ss;
 	struct sockaddr_in6 *in6 = (struct sockaddr_in6 *) ss;
@@ -296,7 +313,7 @@ static int ksock_pton(char *ip, int ip_len, struct sockaddr_storage *ss)
 	return -EINVAL;
 }
 
-static int ksock_dns_resolve(char *name, struct sockaddr_storage *ss)
+static int ksock_dns_resolve(const char *name, struct sockaddr_storage *ss)
 {
 	int ip_len, r;
 	char *ip_addr = NULL;
@@ -312,46 +329,47 @@ static int ksock_dns_resolve(char *name, struct sockaddr_storage *ss)
 	return r;
 }
 
-int ksock_connect_host(struct socket **sockp, char *host, u16 port, struct ksock_callbacks *callbacks)
+int ksock_resolve_addr(const char *host, u16 port, struct sockaddr_storage *addr)
 {
-	struct sockaddr_storage addr;
-	struct sockaddr_in *in4 = (struct sockaddr_in *)&addr;
-	struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)&addr;
 	int r;
-	struct socket *sock;
-	int option;
-	mm_segment_t oldmm;
 
-	r = ksock_pton(host, strlen(host), &addr);
+	r = ksock_pton(host, strlen(host), addr);
 	if (r) {
-		r = ksock_dns_resolve(host, &addr);
+		r = ksock_dns_resolve(host, addr);
 		if (r)
 			return r;
 	}
+	ksock_addr_set_port(addr, port);
+	return r;
+}
 
-	r = sock_create(addr.ss_family, SOCK_STREAM, 0, &sock);
+int ksock_connect_host(struct socket **sockp, const char *host, u16 port, struct ksock_callbacks *callbacks)
+{
+	struct sockaddr_storage addr;
+	int r;
+
+	r = ksock_resolve_addr(host, port, &addr);
 	if (r)
 		return r;
 
-	oldmm = get_fs();
-	set_fs(KERNEL_DS);
-	option = 1;
-	r = sock_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
-		(char *)&option, sizeof(option));
-	set_fs(oldmm);
-	if (r)
-		goto release_sock;
+	return ksock_connect_addr(sockp, &addr, callbacks);
+}
 
-	r = ksock_set_nodelay(sock, true);
-	if (r)
-		goto release_sock;
+int ksock_connect_addr(struct socket **sockp, struct sockaddr_storage *addr, struct ksock_callbacks *callbacks)
+{
+	int r;
+	struct socket *sock;
 
-	ksock_addr_set_port(&addr, port);
-
-	r = sock->ops->connect(sock, (struct sockaddr *)&addr,
-		(addr.ss_family == AF_INET) ? sizeof(*in4) : sizeof(*in6), 0);
+	r = sock_create(addr->ss_family, SOCK_STREAM, 0, &sock);
 	if (r)
-		goto release_sock;
+		return r;
+
+	r = sock->ops->connect(sock, (struct sockaddr *)addr,
+		(addr->ss_family == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6), O_NONBLOCK);
+	if (r) {
+		if (r != -EINPROGRESS)
+			goto release_sock;
+	}
 
 	if (callbacks) {
 		struct sock *sk = sock->sk;

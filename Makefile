@@ -8,7 +8,7 @@ obj-m = $(MODNAME).o
 
 KBUILD_EXTRA_SYMBOLS = $(KERNEL_BUILD_PATH)/Module.symvers
 
-ccflags-y := -I$(src) -g
+ccflags-y := -I$(src)
 
 all:
 	$(MAKE) -C $(KERNEL_BUILD_PATH) M=$(CURRDIR) modules

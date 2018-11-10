@@ -5,14 +5,21 @@
 
 static int tlb_target_init(struct tlb_target *target, const char *host, int port)
 {
+	int r;
+
 	if (strlen(host) >= ARRAY_SIZE(target->host))
 		return -EINVAL;
 
 	if (port <= 0 || port > 65535)
 		return -EINVAL;
 
+	r = ksock_resolve_addr(host, port, &target->addr);
+	if (r)
+		return r;
+
 	snprintf(target->host, ARRAY_SIZE(target->host), "%s", host);
 	target->port = port;
+
 	atomic_set(&target->ref_count, 1);
 	return 0;
 }
@@ -68,7 +75,7 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 	callbacks.write_space = tlb_target_con_write_space;
 	callbacks.state_change = tlb_target_con_state_change;
 
-	r = ksock_connect_host(&con->sock, target->host, target->port, &callbacks);
+	r = ksock_connect_addr(&con->sock, &target->addr, &callbacks);
 	if (r) {
 		kfree(con);
 		return r;

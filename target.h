@@ -8,6 +8,7 @@ struct tlb_server;
 struct tlb_target {
 	char host[64];
 	int port;
+	struct sockaddr_storage addr;
 	atomic_t ref_count;
 };
 

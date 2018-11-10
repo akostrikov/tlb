@@ -118,11 +118,9 @@ void coroutine_signal(struct coroutine *co)
 	struct coroutine_thread_work *work;
 	unsigned long flags;
 
-
-	work = kmalloc(sizeof(*work), GFP_ATOMIC);
-	if (!work)
-		return;
-
+	trace_coroutine_signal(co);
+	work = kmalloc(sizeof(*work), GFP_ATOMIC|__GFP_NOFAIL);
+	BUG_ON(!work);
 	coroutine_ref(co);
 	work->co = co;
 
