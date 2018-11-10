@@ -82,8 +82,11 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 
 void tlb_target_con_close(struct tlb_target_con *con)
 {
-	if (con->sock)
+	if (con->sock) {
+		trace_con_sock_release(con);
 		ksock_release(con->sock);
+		trace_con_sock_release_return(con);
+	}
 	if (con->buf)
 		kfree(con->buf);
 

@@ -5,7 +5,15 @@
 
 void tlb_con_delete(struct tlb_con *con)
 {
+	s64 age;
+
 	BUG_ON(!list_empty(&con->list_entry));
+
+	if (con->start_time) {
+		age = ktime_ms_delta(ktime_get(), con->start_time);
+		if (age > 5)
+			trace_con_too_long(con, age);
+	}
 
 	if (con->target_con)
 		tlb_target_con_close(con->target_con);
@@ -14,8 +22,11 @@ void tlb_con_delete(struct tlb_con *con)
 	if (con->buf)
 		kfree(con->buf);
 
-	if (con->sock)
+	if (con->sock) {
+		trace_con_sock_release(con);
 		ksock_release(con->sock);
+		trace_con_sock_release_return(con);
+	}
 
 	trace_con_delete(con, con->co);
 
@@ -71,9 +82,9 @@ static int copy_socket_coroutine(struct coroutine *co, struct socket *from, stru
 
 	*closed = false;
 	for (;;) {
-		//trace("co 0x%px ksock_recv buf 0x%px \n", co, buf);
+		trace_coroutine_recv(co, buf_len);
 		r = ksock_recv(from, buf, buf_len);
-		//trace("co 0x%px ksock_recv r %d\n", co, r);
+		trace_coroutine_recv_return(co, r);
 		if (r < 0) {
 			if (r == -EAGAIN) {
 				coroutine_yield(co);
@@ -88,9 +99,9 @@ static int copy_socket_coroutine(struct coroutine *co, struct socket *from, stru
 		received = r;
 		sent = 0;
 		while (sent < received) {
-			//trace("co 0x%px ksock_send\n", co);
+			trace_coroutine_send(co, received - sent);
 			r = ksock_send(to, buf + sent, received - sent);
-			//trace("co 0x%px ksock_send r %d\n", co, r);
+			trace_coroutine_send_return(co, r);
 			if (r < 0) {
 				if (r == -EAGAIN) {
 					coroutine_yield(co);
@@ -130,6 +141,11 @@ static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 			break;
 	}
 
+	trace_con_sock_release(con);
+	ksock_release(con->sock);
+	trace_con_sock_release_return(con);
+
+	con->sock = NULL;
 	kfree(con->buf);
 	con->buf = NULL;
 out:
@@ -182,7 +198,10 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 		if (closed)
 			break;	
 	}
-
+	trace_con_sock_release(con);
+	ksock_release(con->sock);
+	trace_con_sock_release_return(con);
+	con->sock = NULL;
 	if (r)
 		coroutine_cancel(con->target_con->co);
 	else {

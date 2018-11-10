@@ -80,6 +80,7 @@ var (
 
 func completeRequest(w http.ResponseWriter, requestId string, err error, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Connection", "close")
 	if err != nil {
 		switch err {
 		case ErrNotFound:

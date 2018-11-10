@@ -1,6 +1,11 @@
 #include "coroutine.h"
 #include "trace.h"
 
+struct coroutine_thread_work {
+	struct coroutine *co;
+	struct list_head list_entry;
+};
+
 struct coroutine *coroutine_create(struct coroutine_thread *thread)
 {
 	struct coroutine *co;
@@ -9,12 +14,12 @@ struct coroutine *coroutine_create(struct coroutine_thread *thread)
 	if (!co)
 		return NULL;
 	memset(co, 0, sizeof(*co));
+	mutex_init(&co->lock);
 	co->magic = COROUTINE_MAGIC;
 	co->thread = thread;
 	co->stack = kmalloc(COROUTINE_STACK_SIZE, GFP_KERNEL);
+	co->state = COROUTINE_INITED;
 	atomic_set(&co->ref_count, 1);
-	atomic_set(&co->signaled, 0);
-	INIT_LIST_HEAD(&co->co_list_entry);
 	if (!co->stack) {
 		kfree(co);
 		return NULL;
@@ -37,7 +42,6 @@ void coroutine_ref(struct coroutine *co)
 static void coroutine_delete(struct coroutine *co)
 {
 	struct coroutine_thread *thread = co->thread;
-	unsigned long flags;
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
@@ -45,10 +49,6 @@ static void coroutine_delete(struct coroutine *co)
 	BUG_ON(atomic_read(&co->ref_count) != 0);
 
 	trace_coroutine_delete(co, co->stack, thread);
-
-	spin_lock_irqsave(&thread->co_list_lock, flags);
-	list_del_init(&co->co_list_entry);
-	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
 	kfree(co->stack);
 	kfree(co);
@@ -69,29 +69,34 @@ static void coroutine_trampoline(void)
 	co = (struct coroutine *)(*(ulong *)(stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong)));
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);	
+	BUG_ON(co->state != COROUTINE_RUNNING);
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
 	BUG_ON(*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) != COROUTINE_STACK_TOP_MAGIC);
 
 	co->ret = co->fun(co, co->arg);
 
 	BUG_ON(co->magic != COROUTINE_MAGIC);	
+	BUG_ON(co->state != COROUTINE_RUNNING);
 	BUG_ON(*(ulong *)((ulong)co->stack) != COROUTINE_STACK_BOTTOM_MAGIC);
 	BUG_ON(*(ulong *)((ulong)co->stack + COROUTINE_STACK_SIZE - sizeof(ulong)) != COROUTINE_STACK_TOP_MAGIC);
 
 	mb();
-	co->running = false;
+	co->state = COROUTINE_EXITED;
 	coroutine_yield(co);
 }
 
 void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, void* arg), void *arg)
 {
 	BUG_ON(co->magic != COROUTINE_MAGIC);
-	
+
+	mutex_lock(&co->lock);
+	BUG_ON(co->state != COROUTINE_INITED);
 	co->fun = fun;
 	co->arg = arg;
 	co->ctx.rip = (ulong)coroutine_trampoline;	
 	co->ctx.rsp = (ulong)co->stack + COROUTINE_STACK_SIZE - 2 * sizeof(ulong);
-	co->running = true;
+	co->state = COROUTINE_READY;
+	mutex_unlock(&co->lock);
 
 	coroutine_signal(co);
 }
@@ -99,109 +104,87 @@ void coroutine_start(struct coroutine *co, void* (*fun)(struct coroutine *co, vo
 static __always_inline void coroutine_enter(struct coroutine *co)
 {
 	BUG_ON(co->magic != COROUTINE_MAGIC);
-	BUG_ON(!co->running);
+	BUG_ON(co->state != COROUTINE_RUNNING);
 
+	trace_coroutine_enter(co);
 	if (kernel_setjmp(&co->thread->ctx) == 0)
 		kernel_longjmp(&co->ctx, 0x1);
+	trace_coroutine_enter_return(co);
 }
 
 void coroutine_signal(struct coroutine *co)
 {
 	struct coroutine_thread *thread = co->thread;
+	struct coroutine_thread_work *work;
 	unsigned long flags;
 
-	atomic_inc(&co->signaled);
-	spin_lock_irqsave(&thread->co_list_lock, flags);
-	if (list_empty(&co->co_list_entry)) {
-		coroutine_ref(co);
-		list_add_tail(&co->co_list_entry, &thread->co_list);
-	}
-	spin_unlock_irqrestore(&thread->co_list_lock, flags);
 
-	atomic_inc(&thread->signaled);
+	work = kmalloc(sizeof(*work), GFP_ATOMIC);
+	if (!work)
+		return;
+
+	coroutine_ref(co);
+	work->co = co;
+
+	spin_lock_irqsave(&thread->work_list_lock, flags);
+	list_add_tail(&work->list_entry, &thread->work_list);
+	spin_unlock_irqrestore(&thread->work_list_lock, flags);
+
 	wake_up_interruptible(&thread->waitq);
 }
 
 void coroutine_cancel(struct coroutine *co)
 {
-	co->running = false;
-	coroutine_signal(co);
-}
-
-static struct coroutine *coroutine_thread_next_coroutine(struct coroutine_thread *thread, struct coroutine *prev_co)
-{
-	struct list_head *list_entry;
-	struct coroutine *co;
-	unsigned long flags;
-
-	if (prev_co == NULL && list_empty(&thread->co_list))
-		return NULL;
-
-	spin_lock_irqsave(&thread->co_list_lock, flags);
-	list_entry = (prev_co) ? prev_co->co_list_entry.next : thread->co_list.next;
-	while (list_entry != &thread->co_list) {
-		co = container_of(list_entry, struct coroutine, co_list_entry);
-		if (atomic_read(&co->ref_count) && atomic_inc_not_zero(&co->ref_count)) {
-			spin_unlock_irqrestore(&thread->co_list_lock, flags);
-			if (prev_co)
-				coroutine_deref(prev_co);
-			return co;
-		}
-		list_entry = list_entry->next;
-	}
-	spin_unlock_irqrestore(&thread->co_list_lock, flags);
-	if (prev_co)
-		coroutine_deref(prev_co);
-	return NULL;
+	mutex_lock(&co->lock);
+	if (co->state == COROUTINE_READY)
+		co->state = COROUTINE_CANCELED;
+	else
+		BUG_ON(co->state != COROUTINE_RUNNING && co->state != COROUTINE_EXITED);
+	mutex_unlock(&co->lock);
 }
 
 static int coroutine_thread_routine(void *data)
 {
 	struct coroutine_thread *thread = (struct coroutine_thread *)data;
-	struct coroutine *co, *next_co;
+	struct coroutine *co;
+	struct coroutine_thread_work *work, *work_tmp;
+	struct list_head work_list;
 	unsigned long flags;
 
 	for (;;) {
-		wait_event_interruptible(thread->waitq, (thread->stopping || atomic_read(&thread->signaled)));
+		trace_coroutine_thread_wait(thread);
+		wait_event_interruptible(thread->waitq, (thread->stopping || !list_empty(&thread->work_list)));
+		trace_coroutine_thread_wait_return(thread);
 		if (thread->stopping)
 			break;
 
-		for (;;) {
-			co = coroutine_thread_next_coroutine(thread, NULL);
-			while (co != NULL) {
-				if (co->running)
-					coroutine_enter(co);
+		if (list_empty(&thread->work_list))
+			continue;
 
-				next_co = coroutine_thread_next_coroutine(thread, co);
+		INIT_LIST_HEAD(&work_list);
+		spin_lock_irqsave(&thread->work_list_lock, flags);
+		list_splice_init(&thread->work_list, &work_list);
+		spin_unlock_irqrestore(&thread->work_list_lock, flags);
 
-				if (atomic_dec_and_test(&co->signaled)) {
-					spin_lock_irqsave(&thread->co_list_lock, flags);
-					BUG_ON(list_empty(&co->co_list_entry));
-					list_del_init(&co->co_list_entry);
-					spin_unlock_irqrestore(&thread->co_list_lock, flags);
-					coroutine_deref(co);
-				} else {
-					spin_lock_irqsave(&thread->co_list_lock, flags);
-					BUG_ON(list_empty(&co->co_list_entry));
-					list_del_init(&co->co_list_entry);
-					list_add_tail(&co->co_list_entry, &thread->co_list);
-					spin_unlock_irqrestore(&thread->co_list_lock, flags);
-				}
-
-				co = next_co;
+		list_for_each_entry_safe(work, work_tmp, &work_list, list_entry) {
+			list_del_init(&work->list_entry);
+			co = work->co;
+			mutex_lock(&co->lock);
+			if (co->state == COROUTINE_READY) {
+				co->state = COROUTINE_RUNNING;
+				coroutine_enter(co);
+				if (co->state == COROUTINE_RUNNING)
+					co->state = COROUTINE_READY;
+				else
+					BUG_ON(co->state != COROUTINE_EXITED);
 			}
-			if (atomic_dec_and_test(&thread->signaled))
-				break;
+			mutex_unlock(&co->lock);
+			coroutine_deref(co);
+			kfree(work);
 		}
 	}
-	return 0;
-}
 
-void* coroutine_wait(struct coroutine *self, struct coroutine *co)
-{
-	while (co->running)
-		coroutine_yield(self);
-	return co->ret;
+	return 0;
 }
 
 int coroutine_thread_start(struct coroutine_thread *thread, const char *name, unsigned int cpu)
@@ -209,11 +192,10 @@ int coroutine_thread_start(struct coroutine_thread *thread, const char *name, un
 	struct task_struct *task;
 
 	memset(thread, 0, sizeof(*thread));
-	spin_lock_init(&thread->co_list_lock);
-	INIT_LIST_HEAD(&thread->co_list);
+	spin_lock_init(&thread->work_list_lock);
+	INIT_LIST_HEAD(&thread->work_list);
 	init_waitqueue_head(&thread->waitq);
 	thread->stopping = false;
-	atomic_set(&thread->signaled, 0);
 
 	task = kthread_create(coroutine_thread_routine, thread, "%s-%u", name, cpu);
 	if (IS_ERR(task))
@@ -230,22 +212,24 @@ int coroutine_thread_start(struct coroutine_thread *thread, const char *name, un
 
 void coroutine_thread_stop(struct coroutine_thread *thread)
 {
-	struct coroutine *co, *co_tmp;
-	struct list_head co_list;
+	struct coroutine_thread_work *work, *work_tmp;
+	struct list_head work_list;
 	unsigned long flags;
 
 	thread->stopping = true;
 	wake_up_interruptible(&thread->waitq);
 	kthread_stop(thread->task);
 
-	INIT_LIST_HEAD(&co_list);
-	spin_lock_irqsave(&thread->co_list_lock, flags);
-	list_splice_init(&thread->co_list, &co_list);
-	spin_unlock_irqrestore(&thread->co_list_lock, flags);
+	INIT_LIST_HEAD(&work_list);
+	spin_lock_irqsave(&thread->work_list_lock, flags);
+	list_splice_init(&thread->work_list, &work_list);
+	spin_unlock_irqrestore(&thread->work_list_lock, flags);
 
-	list_for_each_entry_safe(co, co_tmp, &co_list, co_list_entry) {
-		list_del_init(&co->co_list_entry);
-		coroutine_deref(co);	
+	list_for_each_entry_safe(work, work_tmp, &work_list, list_entry) {
+		list_del_init(&work->list_entry);
+		coroutine_deref(work->co);
+		kfree(work);
 	}
+
 	put_task_struct(thread->task);
 }

@@ -32,6 +32,8 @@ static int tlb_server_listen_thread_routine(void *arg)
 			tlb_con_delete(con);
 			continue;
 		}
+
+		con->start_time = ktime_get();
 		spin_lock(&srv->con_list_lock);
 		list_add_tail(&con->list_entry, &srv->con_list);
 		spin_unlock(&srv->con_list_lock);

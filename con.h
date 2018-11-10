@@ -15,6 +15,7 @@ struct tlb_con {
 	int buf_len;
 	struct tlb_target *target;
 	struct tlb_target_con *target_con;
+	ktime_t start_time;
 };
 
 struct tlb_con *tlb_con_create(struct tlb_server *srv);

@@ -158,8 +158,6 @@ out:
 
 void ksock_release(struct socket *sock)
 {
-
-	synchronize_rcu();
 	kernel_sock_shutdown(sock, SHUT_RDWR);
 	sock_release(sock);
 }
