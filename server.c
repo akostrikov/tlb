@@ -54,9 +54,14 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 {
 	int r, i;
 	unsigned int cpu;
+	struct sockaddr_storage addr;
 
 	if (strlen(host) >= ARRAY_SIZE(srv->host) || port <= 0 || port > 65535)
 		return -EINVAL;
+
+	r = ksock_resolve_addr(host, port, &addr);
+	if (r)
+		return r;
 
 	mutex_lock(&srv->lock);
 	if (srv->state != TLB_SRV_INITED) {
@@ -73,7 +78,7 @@ int tlb_server_start(struct tlb_server *srv, const char *host, int port)
 	INIT_LIST_HEAD(&srv->con_list);
 	spin_lock_init(&srv->con_list_lock);
 	for (i = 0; i < 5; i++) {
-		r = ksock_listen_host(&srv->listen_sock, srv->host, srv->port, SOMAXCONN);
+		r = ksock_listen_addr(&srv->listen_sock, &addr, SOMAXCONN);
 		if (r) {
 			pr_err("tlb: ksock_listen r %d\n", r);
 			if (r == -EADDRINUSE) {
