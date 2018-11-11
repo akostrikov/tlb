@@ -81,8 +81,7 @@ static ssize_t tlb_attr_start_server_store(struct tlb_context *tlb,
 static ssize_t tlb_attr_start_server_show(struct tlb_context *tlb,
 				     char *buf)
 {
-	snprintf(buf, PAGE_SIZE, "\n");
-	return strlen(buf);
+	return scnprintf(buf, PAGE_SIZE, "\n");
 }
 
 static ssize_t tlb_attr_stop_server_store(struct tlb_context *tlb,
@@ -100,8 +99,7 @@ static ssize_t tlb_attr_stop_server_store(struct tlb_context *tlb,
 static ssize_t tlb_attr_stop_server_show(struct tlb_context *tlb,
 				     char *buf)
 {
-	snprintf(buf, PAGE_SIZE, "\n");
-	return strlen(buf);
+	return scnprintf(buf, PAGE_SIZE, "\n");
 }
 
 static ssize_t tlb_attr_add_target_store(struct tlb_context *tlb,
@@ -143,16 +141,47 @@ static ssize_t tlb_attr_remove_target_store(struct tlb_context *tlb,
 static ssize_t tlb_attr_add_target_show(struct tlb_context *tlb,
 					 char *buf)
 {
-	snprintf(buf, PAGE_SIZE, "\n");
-	return strlen(buf);
+	return scnprintf(buf, PAGE_SIZE, "\n");
 }
 
 
 static ssize_t tlb_attr_remove_target_show(struct tlb_context *tlb,
 					 char *buf)
 {
-	snprintf(buf, PAGE_SIZE, "\n");
-	return strlen(buf);
+	return scnprintf(buf, PAGE_SIZE, "\n");
+}
+
+static ssize_t tlb_attr_targets_show(struct tlb_context *tlb,
+					char *buf)
+{
+	struct tlb_server *srv = &tlb->srv;
+	struct tlb_target *target;
+	int r, off;
+
+	read_lock(&srv->target_lock);
+	off = 0;
+	target = tlb_server_next_target(srv, NULL);
+	while (target) {
+		if (off >= PAGE_SIZE)
+			goto fail_nomem;
+
+		r = snprintf(buf + off, PAGE_SIZE - off, "%s %d %llu %llu %llu %llu %llu\n",
+				target->host, target->port, atomic64_read(&target->total_cons), atomic64_read(&target->active_cons),
+				target->min_con_time_us, target->max_con_time_us,
+				(atomic64_read(&target->total_cons)) ? target->total_con_time_us / atomic64_read(&target->total_cons) : 0);
+		if (r >= (PAGE_SIZE - off))
+			goto fail_nomem;
+
+		off += r;
+		target = tlb_server_next_target(srv, target);
+	}
+	read_unlock(&srv->target_lock);
+	return off;
+
+fail_nomem:
+	tlb_target_put(target);
+	read_unlock(&srv->target_lock);
+	return -ENOMEM;
 }
 
 static ssize_t tlb_attr_show(struct kobject *kobj,
@@ -195,12 +224,14 @@ static TLB_ATTR_RW(start_server);
 static TLB_ATTR_RW(stop_server);
 static TLB_ATTR_RW(add_target);
 static TLB_ATTR_RW(remove_target);
+static TLB_ATTR_RO(targets);
 
 static struct attribute *tlb_attrs[] = {
 	&tlb_attr_start_server.attr,
 	&tlb_attr_stop_server.attr,
 	&tlb_attr_add_target.attr,
 	&tlb_attr_remove_target.attr,
+	&tlb_attr_targets.attr,
 	NULL,
 };
 

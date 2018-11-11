@@ -158,6 +158,8 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 	struct tlb_con *con = (struct tlb_con *)arg;
 	struct tlb_server *srv = con->srv;
 	struct coroutine *target_con_co;
+	struct tlb_target *target;
+	u64 con_time_us;
 	int r;
 	bool closed;
 
@@ -177,6 +179,8 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 		r = -ENOENT;
 		goto free_buf;
 	}
+	atomic64_inc(&con->target->total_cons);
+	atomic64_inc(&con->target->active_cons);
 
 	target_con_co = coroutine_create(co->thread);
 	if (!target_con_co) {
@@ -216,7 +220,19 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 	tlb_target_con_close(con->target_con);
 	con->target_con = NULL;
 put_target:
-	tlb_target_put(con->target);
+	target = con->target;
+	atomic64_dec(&target->active_cons);
+
+	spin_lock(&target->lock);
+	con_time_us = ktime_us_delta(ktime_get(), con->start_time);
+	if (con_time_us > target->max_con_time_us)
+		target->max_con_time_us = con_time_us;
+	if (con_time_us < target->min_con_time_us)
+		target->min_con_time_us = con_time_us;
+	target->total_con_time_us += con_time_us;
+	spin_unlock(&target->lock);
+
+	tlb_target_put(target);
 	con->target = NULL;
 free_buf:
 	kmem_cache_free(g_con_buf_cache, con->buf);

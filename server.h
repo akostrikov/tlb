@@ -29,9 +29,7 @@ struct tlb_server {
 	spinlock_t con_list_lock;
 
 	rwlock_t target_lock;
-	struct tlb_target *target[16];
-	int nr_targets;
-	atomic_t next_target;
+	struct rb_root target_tree;
 };
 
 #define TLB_CON_BUF_SIZE (16 * 1024)

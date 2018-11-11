@@ -13,14 +13,17 @@ static int tlb_target_init(struct tlb_target *target, const char *host, int port
 	if (port <= 0 || port > 65535)
 		return -EINVAL;
 
+	memset(target, 0, sizeof(*target));
 	r = ksock_resolve_addr(host, port, &target->addr);
 	if (r)
 		return r;
 
 	snprintf(target->host, ARRAY_SIZE(target->host), "%s", host);
 	target->port = port;
-
 	atomic_set(&target->ref_count, 1);
+	atomic64_set(&target->active_cons, 0);
+	atomic64_set(&target->total_cons, 0);
+	target->min_con_time_us = U64_MAX;
 	return 0;
 }
 
@@ -77,6 +80,7 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 
 	r = ksock_connect_addr(&con->sock, &target->addr, &callbacks);
 	if (r) {
+		coroutine_deref(con->co);
 		kmem_cache_free(g_target_con_cache, con);
 		return r;
 	}
@@ -106,69 +110,97 @@ void tlb_target_con_close(struct tlb_target_con *con)
 void tlb_server_init_targets(struct tlb_server *srv)
 {
 	rwlock_init(&srv->target_lock);
-	srv->nr_targets = 0;
-	atomic_set(&srv->next_target, 0);
+	srv->target_tree = RB_ROOT;
 }
 
 void tlb_server_deinit_targets(struct tlb_server *srv)
 {
-	int i;
+	struct rb_node *node;
+	struct tlb_target *target;
 
-	for (i = 0; i < srv->nr_targets; i++)
-		tlb_target_put(srv->target[i]);
+	for (;;) {
+		node = rb_first(&srv->target_tree);
+		if (!node)
+			break;
+
+		target = rb_entry(node, struct tlb_target, target_tree_entry);
+		rb_erase(&target->target_tree_entry, &srv->target_tree);
+		tlb_target_put(target);
+	}
+}
+
+static int cmp_host_port(const char *host1, int port1, const char *host2, int port2)
+{
+	int cmp;
+
+	cmp = strncmp(host1, host2, strlen(host1) + 1);
+	if (cmp == 0) {
+		if (port1 < port2)
+			return -1;
+		else if (port1 > port2)
+			return 1;
+		return 0;
+	}
+
+	return cmp;
+}
+
+static int cmp_target(struct tlb_target *t1, struct tlb_target *t2)
+{
+	return cmp_host_port(t1->host, t1->port, t2->host, t2->port);
 }
 
 static struct tlb_target *tlb_server_lookup_target(struct tlb_server *srv, const char *host, int port, bool remove)
 {
-	int i;
+	struct rb_node *node = srv->target_tree.rb_node;
 	struct tlb_target *target;
+	int cmp;
 
-	for (i = 0; i < srv->nr_targets; i++) {
-		target = srv->target[i];
-		if (strncmp(target->host, host, strlen(target->host) + 1) == 0 &&
-		    target->port == port) {
-			tlb_target_get(target);
-			if (remove) {
-				memmove(&srv->target[i], &srv->target[i+1],
-					(srv->nr_targets - (i + 1))*sizeof(struct tlb_target *));
-				srv->nr_targets--;
-				tlb_target_put(target);
-			}
+	while (node) {
+		target = rb_entry(node, struct tlb_target, target_tree_entry);
+		cmp = cmp_host_port(host, port, target->host, target->port);
+		if (cmp == 0) {
+			if (remove)
+				rb_erase(&target->target_tree_entry, &srv->target_tree);
+			else
+				tlb_target_get(target);
 			return target;
-		}
+		} else if (cmp < 0)
+			node = node->rb_left;
+		else
+			node = node->rb_right;
 	}
+
 	return NULL;
 }
 
 static int tlb_server_insert_target(struct tlb_server *srv, struct tlb_target *new_target)
 {
 	struct tlb_target *target;
-
-	mutex_lock(&srv->lock);
-	if (srv->state != TLB_SRV_RUNNING) {
-		mutex_unlock(&srv->lock);
-		return -EPERM;
-	}
+	struct rb_node **node;
+	struct rb_node *parent = NULL;
+	int cmp;
 
 	write_lock(&srv->target_lock);
-	if (srv->nr_targets >= ARRAY_SIZE(srv->target)) {
-		write_unlock(&srv->target_lock);	
-		mutex_unlock(&srv->lock);
-		return -ENOMEM;
+	node = &srv->target_tree.rb_node;
+	while (*node) {
+		target = rb_entry(*node, struct tlb_target, target_tree_entry);
+		parent = *node;
+		cmp = cmp_target(new_target, target);
+		if (cmp == 0) {
+			write_unlock(&srv->target_lock);
+			return -EEXIST;
+		} else if (cmp < 0)
+			node = &parent->rb_left;
+		else
+			node = &parent->rb_right;
 	}
 
-	target = tlb_server_lookup_target(srv, new_target->host, new_target->port, false);
-	if (target) {
-		tlb_target_put(target);
-		write_unlock(&srv->target_lock);
-		mutex_unlock(&srv->lock);
-		return -EEXIST;
-	}
-
+	rb_link_node(&new_target->target_tree_entry, parent, node);
+	rb_insert_color(&new_target->target_tree_entry, &srv->target_tree);
 	tlb_target_get(new_target);
-	srv->target[srv->nr_targets++] = new_target;
+
 	write_unlock(&srv->target_lock);
-	mutex_unlock(&srv->lock);
 	return 0;
 }
 
@@ -188,49 +220,62 @@ int tlb_server_add_target(struct tlb_server *srv, const char *host, int port)
 	}
 
 	r = tlb_server_insert_target(srv, target);
-	if (r) {
-		tlb_target_put(target);
-		return r;
-	}
-	return 0;
+	tlb_target_put(target);
+	return r;
 }
 
 int tlb_server_remove_target(struct tlb_server *srv, const char *host, int port)
 {
 	struct tlb_target *target;
 
-	mutex_lock(&srv->lock);
-	if (srv->state != TLB_SRV_RUNNING) {
-		mutex_unlock(&srv->lock);
-		return -EPERM;
-	}
-
 	write_lock(&srv->target_lock);
 	target = tlb_server_lookup_target(srv, host, port, true);
 	if (!target) {
 		write_unlock(&srv->target_lock);
-		mutex_unlock(&srv->lock);
 		return -ENOENT;
 	}
 	tlb_target_put(target);
 	write_unlock(&srv->target_lock);
-	mutex_unlock(&srv->lock);
 	return 0;
 }
 
 struct tlb_target* tlb_server_select_target(struct tlb_server *srv)
 {
+	struct rb_node *node;
 	struct tlb_target *target;
+	struct tlb_target *least_con_target = NULL;
 
 	read_lock(&srv->target_lock);
-	if (!srv->nr_targets) {
-		read_unlock(&srv->target_lock);
-		return NULL;
+	for (node = rb_first(&srv->target_tree); node != NULL; node = rb_next(node)) {
+		target = rb_entry(node, struct tlb_target, target_tree_entry);
+		if (!least_con_target)
+			least_con_target = target;
+		else
+			if (atomic64_read(&target->active_cons) < atomic64_read(&least_con_target->active_cons))
+				least_con_target = target;
 	}
 
-	atomic_inc(&srv->next_target);
-	target = srv->target[atomic_read(&srv->next_target) % srv->nr_targets];
-	tlb_target_get(target);
+	if (least_con_target)
+		tlb_target_get(least_con_target);
 	read_unlock(&srv->target_lock);
-	return target;
+
+	return least_con_target;
+}
+
+struct tlb_target* tlb_server_next_target(struct tlb_server *srv, struct tlb_target* prev)
+{
+	struct rb_node *node;
+	struct tlb_target *next;
+
+	if (prev == NULL)
+		node = rb_first(&srv->target_tree);
+	else
+		node = rb_next(&prev->target_tree_entry);
+
+	if (node)
+		next = rb_entry(node, struct tlb_target, target_tree_entry);
+	else
+		next = NULL;
+
+	return next;
 }

@@ -10,6 +10,14 @@ struct tlb_target {
 	int port;
 	struct sockaddr_storage addr;
 	atomic_t ref_count;
+	atomic64_t total_cons;
+	atomic64_t active_cons;
+	struct rb_node target_tree_entry;
+
+	spinlock_t lock;
+	u64 min_con_time_us;
+	u64 max_con_time_us;
+	u64 total_con_time_us;
 };
 
 struct tlb_target_con {
@@ -35,3 +43,5 @@ int tlb_server_add_target(struct tlb_server *srv, const char *host, int port);
 int tlb_server_remove_target(struct tlb_server *srv, const char *host, int port);
 
 struct tlb_target* tlb_server_select_target(struct tlb_server *srv);
+
+struct tlb_target* tlb_server_next_target(struct tlb_server *srv, struct tlb_target* prev);
