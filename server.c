@@ -1,6 +1,10 @@
 #include "server.h"
 #include "con.h"
 
+struct kmem_cache *g_con_cache;
+struct kmem_cache *g_target_con_cache;
+struct kmem_cache *g_con_buf_cache;
+
 void tlb_server_unlink_con(struct tlb_server *srv, struct tlb_con *con)
 {
 	spin_lock(&srv->con_list_lock);
@@ -44,10 +48,11 @@ static int tlb_server_listen_thread_routine(void *arg)
 	return 0;
 }
 
-void tlb_server_init(struct tlb_server *srv)
+int tlb_server_init(struct tlb_server *srv)
 {
 	mutex_init(&srv->lock);
 	srv->state = TLB_SRV_INITED;
+	return 0;
 }
 
 int tlb_server_start(struct tlb_server *srv, const char *host, int port)
@@ -159,4 +164,32 @@ int tlb_server_stop(struct tlb_server *srv)
 	srv->state = TLB_SRV_INITED;
 	mutex_unlock(&srv->lock);
 	return 0;
+}
+
+int tlb_server_cache_init(void)
+{
+	g_con_cache = kmem_cache_create("tlb_con_cache", sizeof(struct tlb_con), 0, 0, NULL);
+	if (!g_con_cache)
+		return -ENOMEM;
+
+	g_target_con_cache = kmem_cache_create("tlb_target_con_cache", sizeof(struct tlb_target_con), 0, 0, NULL);
+	if (!g_target_con_cache) {
+		kmem_cache_destroy(g_con_cache);
+		return -ENOMEM;
+	}
+
+	g_con_buf_cache = kmem_cache_create("tlb_con_buf_cache", TLB_CON_BUF_SIZE, 0, 0, NULL);
+	if (!g_con_buf_cache) {
+		kmem_cache_destroy(g_target_con_cache);
+		kmem_cache_destroy(g_con_cache);
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+void tlb_server_cache_deinit(void)
+{
+	kmem_cache_destroy(g_con_buf_cache);
+	kmem_cache_destroy(g_target_con_cache);
+	kmem_cache_destroy(g_con_cache);
 }

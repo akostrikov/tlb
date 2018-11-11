@@ -20,7 +20,7 @@ void tlb_con_delete(struct tlb_con *con)
 	if (con->target)
 		tlb_target_put(con->target);
 	if (con->buf)
-		kfree(con->buf);
+		kmem_cache_free(g_con_buf_cache, con->buf);
 
 	if (con->sock) {
 		trace_con_sock_release(con);
@@ -31,21 +31,21 @@ void tlb_con_delete(struct tlb_con *con)
 	trace_con_delete(con, con->co);
 
 	coroutine_deref(con->co);
-	kfree(con);
+	kmem_cache_free(g_con_cache, con);
 }
 
 struct tlb_con *tlb_con_create(struct tlb_server *srv)
 {
 	struct tlb_con *con;
 
-	con = kmalloc(sizeof(*con), GFP_KERNEL);
+	con = kmem_cache_alloc(g_con_cache, GFP_KERNEL);
 	if (!con)
 		return NULL;
 	memset(con, 0, sizeof(*con));
 	atomic_inc(&srv->next_con_thread);
 	con->co = coroutine_create(&srv->con_thread[atomic_read(&srv->next_con_thread) % srv->nr_con_thread]);
 	if (!con->co) {
-		kfree(con);
+		kmem_cache_free(g_con_cache, con);
 		return NULL;
 	}
 	con->srv = srv;
@@ -126,8 +126,8 @@ static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 
 	trace_target_con_co_enter(con, co);
 
-	con->buf_len = 16 * 1024;
-	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
+	con->buf_len = TLB_CON_BUF_SIZE;
+	con->buf = kmem_cache_alloc(g_con_buf_cache, GFP_KERNEL);
 	if (!con->buf) {
 		r = -ENOMEM;
 		goto out;
@@ -146,7 +146,7 @@ static void *tlb_target_con_coroutine(struct coroutine *co, void *arg)
 	trace_con_sock_release_return(con);
 
 	con->sock = NULL;
-	kfree(con->buf);
+	kmem_cache_free(g_con_buf_cache, con->buf);
 	con->buf = NULL;
 out:
 	trace_target_con_co_leave(con, co, r);
@@ -165,8 +165,8 @@ static void *tlb_con_coroutine(struct coroutine *co, void *arg)
 
 	trace_con_co_enter(con, co);
 
-	con->buf_len = 16 * 1024;
-	con->buf = kmalloc(con->buf_len, GFP_KERNEL);
+	con->buf_len = TLB_CON_BUF_SIZE;
+	con->buf = kmem_cache_alloc(g_con_buf_cache, GFP_KERNEL);
 	if (!con->buf) {
 		r = -ENOMEM;
 		goto out;
@@ -219,7 +219,7 @@ put_target:
 	tlb_target_put(con->target);
 	con->target = NULL;
 free_buf:
-	kfree(con->buf);
+	kmem_cache_free(g_con_buf_cache, con->buf);
 	con->buf = NULL;
 out:
 	trace_con_co_leave(con, co, r);

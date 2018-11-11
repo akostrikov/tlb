@@ -64,7 +64,7 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 	struct ksock_callbacks callbacks;
 	int r;
 
-	con = kmalloc(sizeof(*con), GFP_KERNEL);
+	con = kmem_cache_alloc(g_target_con_cache, GFP_KERNEL);
 	if (!con)
 		return -ENOMEM;
 	memset(con, 0, sizeof(*con));
@@ -77,7 +77,7 @@ int tlb_target_connect(struct tlb_target *target, struct coroutine *co, struct t
 
 	r = ksock_connect_addr(&con->sock, &target->addr, &callbacks);
 	if (r) {
-		kfree(con);
+		kmem_cache_free(g_target_con_cache, con);
 		return r;
 	}
 
@@ -95,12 +95,12 @@ void tlb_target_con_close(struct tlb_target_con *con)
 		trace_con_sock_release_return(con);
 	}
 	if (con->buf)
-		kfree(con->buf);
+		kmem_cache_free(g_con_buf_cache, con->buf);
 
 	trace_target_con_delete(con, con->co);
 
 	coroutine_deref(con->co);
-	kfree(con);
+	kmem_cache_free(g_target_con_cache, con);
 }
 
 void tlb_server_init_targets(struct tlb_server *srv)

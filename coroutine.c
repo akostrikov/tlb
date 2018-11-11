@@ -6,22 +6,26 @@ struct coroutine_thread_work {
 	struct list_head list_entry;
 };
 
+static struct kmem_cache *g_coroutine_cache;
+static struct kmem_cache *g_coroutine_stack_cache;
+static struct kmem_cache *g_coroutine_thread_work_cache;
+
 struct coroutine *coroutine_create(struct coroutine_thread *thread)
 {
 	struct coroutine *co;
 
-	co = kmalloc(sizeof(*co), GFP_KERNEL);
+	co = kmem_cache_alloc(g_coroutine_cache, GFP_KERNEL);
 	if (!co)
 		return NULL;
 	memset(co, 0, sizeof(*co));
 	mutex_init(&co->lock);
 	co->magic = COROUTINE_MAGIC;
 	co->thread = thread;
-	co->stack = kmalloc(COROUTINE_STACK_SIZE, GFP_KERNEL);
 	co->state = COROUTINE_INITED;
 	atomic_set(&co->ref_count, 1);
+	co->stack = kmem_cache_alloc(g_coroutine_stack_cache, GFP_KERNEL);	
 	if (!co->stack) {
-		kfree(co);
+		kmem_cache_free(g_coroutine_cache, co);
 		return NULL;
 	}
 	BUG_ON((ulong)co->stack & (COROUTINE_PAGE_SIZE - 1));
@@ -50,8 +54,8 @@ static void coroutine_delete(struct coroutine *co)
 
 	trace_coroutine_delete(co, co->stack, thread);
 
-	kfree(co->stack);
-	kfree(co);
+	kmem_cache_free(g_coroutine_stack_cache, co->stack);
+	kmem_cache_free(g_coroutine_cache, co);
 }
 
 void coroutine_deref(struct coroutine *co)
@@ -119,7 +123,7 @@ void coroutine_signal(struct coroutine *co)
 	unsigned long flags;
 
 	trace_coroutine_signal(co);
-	work = kmalloc(sizeof(*work), GFP_ATOMIC|__GFP_NOFAIL);
+	work = kmem_cache_alloc(g_coroutine_thread_work_cache, GFP_ATOMIC|__GFP_NOFAIL);
 	BUG_ON(!work);
 	coroutine_ref(co);
 	work->co = co;
@@ -178,7 +182,7 @@ static int coroutine_thread_routine(void *data)
 			}
 			mutex_unlock(&co->lock);
 			coroutine_deref(co);
-			kfree(work);
+			kmem_cache_free(g_coroutine_thread_work_cache, work);
 		}
 	}
 
@@ -226,8 +230,36 @@ void coroutine_thread_stop(struct coroutine_thread *thread)
 	list_for_each_entry_safe(work, work_tmp, &work_list, list_entry) {
 		list_del_init(&work->list_entry);
 		coroutine_deref(work->co);
-		kfree(work);
+		kmem_cache_free(g_coroutine_thread_work_cache, work);
 	}
 
 	put_task_struct(thread->task);
+}
+
+int coroutine_init(void)
+{
+	g_coroutine_cache = kmem_cache_create("tlb_co_cache", sizeof(struct coroutine), 0, 0, NULL);
+	if (!g_coroutine_cache)
+		return -ENOMEM;
+
+	g_coroutine_stack_cache = kmem_cache_create("tlb_co_stack_cache", COROUTINE_STACK_SIZE, 0, 0, NULL);
+	if (!g_coroutine_cache) {
+		kmem_cache_destroy(g_coroutine_cache);
+		return -ENOMEM;
+	}
+
+	g_coroutine_thread_work_cache = kmem_cache_create("tlb_co_thread_work_cache", sizeof(struct coroutine_thread_work), 0, 0, NULL);
+	if (!g_coroutine_thread_work_cache) {
+		kmem_cache_destroy(g_coroutine_stack_cache);
+		kmem_cache_destroy(g_coroutine_cache);
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+void coroutine_deinit(void)
+{
+	kmem_cache_destroy(g_coroutine_thread_work_cache);
+	kmem_cache_destroy(g_coroutine_stack_cache);
+	kmem_cache_destroy(g_coroutine_cache);
 }

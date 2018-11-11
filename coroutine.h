@@ -72,3 +72,7 @@ void coroutine_cancel(struct coroutine *co);
 int coroutine_thread_start(struct coroutine_thread *thread, const char *name, unsigned int cpu);
 
 void coroutine_thread_stop(struct coroutine_thread *thread);
+
+int coroutine_init(void);
+
+void coroutine_deinit(void);

@@ -34,10 +34,20 @@ struct tlb_server {
 	atomic_t next_target;
 };
 
-void tlb_server_init(struct tlb_server *srv);
+#define TLB_CON_BUF_SIZE (16 * 1024)
+
+int tlb_server_init(struct tlb_server *srv);
 
 int tlb_server_start(struct tlb_server *srv, const char *host, int port);
 
 int tlb_server_stop(struct tlb_server *srv);
 
 void tlb_server_unlink_con(struct tlb_server *srv, struct tlb_con *con);
+
+int tlb_server_cache_init(void);
+
+void tlb_server_cache_deinit(void);
+
+extern struct kmem_cache *g_con_cache;
+extern struct kmem_cache *g_target_con_cache;
+extern struct kmem_cache *g_con_buf_cache;

@@ -10,10 +10,33 @@ static int __init tlb_init(void)
 
 	pr_info("tlb: initing\n");
 
-	tlb_server_init(&g_context.srv);
+	r = coroutine_init();
+	if (r)
+		goto fail;
+
+	r = tlb_server_cache_init();
+	if (r)
+		goto fail_coroutine_deinit;
+
+	r = tlb_server_init(&g_context.srv);
+	if (r)
+		goto fail_server_cache_deinit;
+
 	r = tlb_sysfs_init(&g_context.kobj_holder, fs_kobj, &tlb_ktype, "%s", "tlb");
+	if (r)
+		goto fail_server_deinit;
 
 	pr_info("tlb: inited r %d\n", r);
+	return r;
+
+fail_server_deinit:
+	tlb_server_stop(&g_context.srv);
+fail_server_cache_deinit:
+	tlb_server_cache_deinit();
+fail_coroutine_deinit:
+	coroutine_deinit();
+fail:
+	pr_err("tlb: inited r %d\n", r);
 	return r;
 }
 
@@ -23,7 +46,8 @@ static void __exit tlb_exit(void)
 
 	tlb_sysfs_deinit(&g_context.kobj_holder);
 	tlb_server_stop(&g_context.srv);
-
+	tlb_server_cache_deinit();
+	coroutine_deinit();
 	pr_info("tlb: exited\n");
 }
 
