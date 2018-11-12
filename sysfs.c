@@ -157,6 +157,7 @@ static ssize_t tlb_attr_targets_show(struct tlb_context *tlb,
 	struct tlb_server *srv = &tlb->srv;
 	struct tlb_target *target;
 	int r, off;
+	u64 con_time_p50, con_time_p75, con_time_p90, con_time_p99, con_time_p995;
 
 	read_lock(&srv->target_lock);
 	off = 0;
@@ -165,10 +166,23 @@ static ssize_t tlb_attr_targets_show(struct tlb_context *tlb,
 		if (off >= PAGE_SIZE)
 			goto fail_nomem;
 
-		r = snprintf(buf + off, PAGE_SIZE - off, "%s %d %llu %llu %llu %llu %llu\n",
+		con_time_p995 = con_time_p99 = con_time_p90 = con_time_p75 = con_time_p50 = 0;
+		spin_lock(&target->lock);
+		if (resample_count(&target->con_time_sample) == 1000) {
+			resample_sort(&target->con_time_sample);
+			con_time_p50 = resample_get(&target->con_time_sample, 500);
+			con_time_p75 = resample_get(&target->con_time_sample, 750);
+			con_time_p90 = resample_get(&target->con_time_sample, 900);
+			con_time_p99 = resample_get(&target->con_time_sample, 990);
+			con_time_p995 = resample_get(&target->con_time_sample, 995);
+		}
+		spin_unlock(&target->lock);
+
+		r = snprintf(buf + off, PAGE_SIZE - off, "%s %d %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
 				target->host, target->port, atomic64_read(&target->total_cons), atomic64_read(&target->active_cons),
 				target->min_con_time_us, target->max_con_time_us,
-				(atomic64_read(&target->total_cons)) ? target->total_con_time_us / atomic64_read(&target->total_cons) : 0);
+				(atomic64_read(&target->total_cons)) ? target->total_con_time_us / atomic64_read(&target->total_cons) : 0,
+				con_time_p50, con_time_p75, con_time_p90, con_time_p99, con_time_p995);
 		if (r >= (PAGE_SIZE - off))
 			goto fail_nomem;
 

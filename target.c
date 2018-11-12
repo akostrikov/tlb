@@ -24,6 +24,8 @@ static int tlb_target_init(struct tlb_target *target, const char *host, int port
 	atomic64_set(&target->active_cons, 0);
 	atomic64_set(&target->total_cons, 0);
 	target->min_con_time_us = U64_MAX;
+
+	resample_init(&target->con_time_sample, target->con_time_sample_value, ARRAY_SIZE(target->con_time_sample_value));
 	return 0;
 }
 

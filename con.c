@@ -230,6 +230,7 @@ put_target:
 	if (con_time_us < target->min_con_time_us)
 		target->min_con_time_us = con_time_us;
 	target->total_con_time_us += con_time_us;
+	resample_add(&target->con_time_sample, con_time_us);
 	spin_unlock(&target->lock);
 
 	tlb_target_put(target);

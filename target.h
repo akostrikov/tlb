@@ -2,6 +2,7 @@
 
 #include "ksock.h"
 #include "coroutine.h"
+#include "resample.h"
 
 struct tlb_server;
 
@@ -18,6 +19,10 @@ struct tlb_target {
 	u64 min_con_time_us;
 	u64 max_con_time_us;
 	u64 total_con_time_us;
+
+
+	struct resample con_time_sample;
+	u64 con_time_sample_value[1000];
 };
 
 struct tlb_target_con {

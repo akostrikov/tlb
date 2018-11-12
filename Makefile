@@ -2,7 +2,7 @@ CURRDIR = $(shell pwd)
 KERNEL_BUILD_PATH=/lib/modules/$(shell uname -r)/build
 
 MODNAME = tlb
-$(MODNAME)-y += module.o setjmp_64.o coroutine.o ksock.o server.o con.o target.o sysfs.o trace.o
+$(MODNAME)-y += module.o setjmp_64.o coroutine.o ksock.o server.o con.o target.o sysfs.o trace.o resample.o
 
 obj-m = $(MODNAME).o
 
